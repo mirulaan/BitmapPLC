@@ -1,0 +1,767 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g., 4.1.2)'
+        required: false
+        default: ''
+      platforms:
+        description: 'Which platforms to build (ignored on tag pushes, which always build all)'
+        required: false
+        type: choice
+        default: 'all'
+        options:
+          - all
+          - macos
+          - windows
+          - linux
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22.x'
+
+jobs:
+  # =============================================================================
+  # Release trust module - tag builds only; every other run bundles the development module
+  # =============================================================================
+  trust-module:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    environment: release-trust
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Install STruC++
+        run: npm run setup:strucpp
+
+      - name: Generate the trust module
+        env:
+          OPENPLC_TRUST_SEED_SECRET: ${{ secrets.TRUST_SEED_SECRET }}
+        run: npx ts-node --transpile-only scripts/package-trust/cli.ts generate-release --version "${GITHUB_REF_NAME#v}" --commit "$GITHUB_SHA" --out release/package-trust/package-trust-anchor.ts
+
+      - name: Check the trust module at every check site
+        run: |
+          OPENPLC_TRUST_MODULE_UNDER_TEST="$GITHUB_WORKSPACE/release/package-trust/package-trust-anchor.ts" \
+            npx jest --config jest.config.json --ci src/backend/editor/package-trust/__tests__/check-sites.test.ts
+
+      - name: Upload the trust module
+        uses: actions/upload-artifact@v4
+        with:
+          name: trust-module
+          path: release/package-trust/package-trust-anchor.ts
+          retention-days: 1
+          if-no-files-found: error
+
+  # =============================================================================
+  # Cross-seed check - tag builds only; two public seeds must give different trust call sites
+  # =============================================================================
+  cross-seed:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Install STruC++
+        run: npm run setup:strucpp
+
+      - name: Check that two seeds give different call sites
+        run: npx ts-node --transpile-only scripts/package-trust/cli.ts cross-seed-check --root "$GITHUB_WORKSPACE"
+
+  # =============================================================================
+  # macOS Build - Builds both x64 and arm64
+  # =============================================================================
+  build-macos:
+    needs: trust-module
+    runs-on: macos-latest
+    if: ${{ !cancelled() && (needs.trust-module.result == 'success' || needs.trust-module.result == 'skipped') && (github.event_name == 'push' || inputs.platforms == 'all' || inputs.platforms == 'macos') }}
+    env:
+      OPENPLC_RELEASE_BUILD: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Cache tool binaries
+        uses: actions/cache@v4
+        with:
+          path: resources/bin
+          key: binaries-macOS-${{ hashFiles('binary-versions.json') }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download binaries for x64
+        run: npx ts-node scripts/download-binaries.ts --arch x64
+
+      - name: Get version and build date
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${{ github.ref_name }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION=$(node -p "require('./package.json').version")
+          fi
+          BUILD_DATE=$(date +%Y-%m-%d)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION (Build date: $BUILD_DATE)"
+
+      - name: Update package.json version
+        run: |
+          npm version ${{ steps.version.outputs.version }} --no-git-tag-version --allow-same-version
+          cd release/app && npm version ${{ steps.version.outputs.version }} --no-git-tag-version --allow-same-version
+
+      - name: Import Code Signing Certificate
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Create temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          # Create keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # Import certificate
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+          # Clean up
+          rm $RUNNER_TEMP/certificate.p12
+
+      - name: Download the trust module
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/download-artifact@v4
+        with:
+          name: trust-module
+          path: release/package-trust
+
+      - name: Build and package
+        env:
+          CI: 'true'
+          BUILD_DATE: ${{ steps.version.outputs.build_date }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm run package
+
+      - name: Read the fuses of every built executable
+        run: node scripts/release/read-fuses.mjs "release/build/mac/OpenPLC Editor.app" "release/build/mac-arm64/OpenPLC Editor.app"
+
+      - name: Scan the unpacked outputs for trust-anchor literals
+        run: node scripts/release/scan-trust-literals.mjs --trusted-keys src/backend/shared/utils/vpp/trusted-keys.ts release/build/mac release/build/mac-arm64
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Create branded DMG files
+        run: |
+          chmod +x ./create_dmg.sh
+          ./create_dmg.sh "${{ steps.version.outputs.version }}"
+
+      - name: Upload macOS x64 DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-x64-dmg
+          path: OpenPLC_Editor_${{ steps.version.outputs.version }}.dmg
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload macOS ARM64 DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-dmg
+          path: OpenPLC_Editor_${{ steps.version.outputs.version }}-ARM.dmg
+          retention-days: 30
+          if-no-files-found: error
+
+  # =============================================================================
+  # Windows Build - x64
+  # =============================================================================
+  build-windows-x64:
+    # Pinned alongside build-windows-arm64 (see the comment block on
+    # that job for the full story).  The Win-x64 build succeeded on
+    # `windows-latest = windows-2025-vs2026` for v4.2.2, but the
+    # underlying VS 2026 maxBuffer issue could trip x64 too on a
+    # future runner rotation.  Pinning both today is cheaper than
+    # debugging the same class of failure again in a few months.
+    needs: trust-module
+    runs-on: windows-2022
+    if: ${{ !cancelled() && (needs.trust-module.result == 'success' || needs.trust-module.result == 'skipped') && (github.event_name == 'push' || inputs.platforms == 'all' || inputs.platforms == 'windows') }}
+    env:
+      OPENPLC_RELEASE_BUILD: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Cache tool binaries
+        uses: actions/cache@v4
+        with:
+          path: resources/bin
+          key: binaries-Windows-x64-${{ hashFiles('binary-versions.json') }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download binaries for x64
+        run: npx ts-node scripts/download-binaries.ts --arch x64
+
+      - name: Get version and build date
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${{ github.ref_name }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION=$(node -p "require('./package.json').version")
+          fi
+          BUILD_DATE=$(date +%Y-%m-%d)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION (Build date: $BUILD_DATE)"
+
+      - name: Update package.json version
+        run: |
+          npm version ${{ steps.version.outputs.version }} --no-git-tag-version --allow-same-version
+          cd release/app && npm version ${{ steps.version.outputs.version }} --no-git-tag-version --allow-same-version
+
+      - name: Download the trust module
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/download-artifact@v4
+        with:
+          name: trust-module
+          path: release/package-trust
+
+      - name: Build and package
+        env:
+          BUILD_DATE: ${{ steps.version.outputs.build_date }}
+        run: npm run package
+
+      - name: Read the fuses of the built executable
+        shell: bash
+        run: node scripts/release/read-fuses.mjs "release/build/win-unpacked/OpenPLC Editor.exe"
+
+      - name: Scan the unpacked output for trust-anchor literals
+        shell: bash
+        run: node scripts/release/scan-trust-literals.mjs --trusted-keys src/backend/shared/utils/vpp/trusted-keys.ts release/build/win-unpacked
+
+      - name: Upload Windows x64 installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-exe
+          path: release/build/*.exe
+          retention-days: 30
+          if-no-files-found: error
+
+  # =============================================================================
+  # Windows Build - ARM64
+  # =============================================================================
+  build-windows-arm64:
+    # Pin to windows-2022 (the only label that still gets VS 2022):
+    # `windows-latest` rotated to the VS 2026 variant on Jun 8 and
+    # broke this job. v4.2.1 (Jun 7) ran on `Image: windows-2025`
+    # which AT THE TIME used the `win25` runner-images branch with
+    # VS 2022.  GitHub has since re-bound the `windows-2025` label
+    # to the `win25-vs2026` branch (VS 2026) — verified by an
+    # explicit `runs-on: windows-2025` resolving to `Image:
+    # windows-2025-vs2026` and failing identically.  So `windows-
+    # 2025` is no longer a working label for our purposes;
+    # `windows-2022` (Windows Server 2022 + VS 2022) is the only
+    # remaining GitHub-hosted image that ships VS 2022.
+    #
+    # The failure mode: VS 2026's `vswhere`/PowerShell enumeration
+    # emits enough metadata that node-gyp's child_process stdout
+    # read overflows with `RangeError
+    # [ERR_CHILD_PROCESS_STDIO_MAXBUFFER]` — node-gyp then reports
+    # "Could not find any Visual Studio installation to use" and
+    # the ARM64 cross-compile of `@serialport/bindings-cpp` fails.
+    # When node-gyp / electron-builder ship a fix we can revert to
+    # `windows-latest`.
+    needs: trust-module
+    runs-on: windows-2022
+    if: ${{ !cancelled() && (needs.trust-module.result == 'success' || needs.trust-module.result == 'skipped') && (github.event_name == 'push' || inputs.platforms == 'all' || inputs.platforms == 'windows') }}
+    env:
+      OPENPLC_RELEASE_BUILD: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Cache tool binaries
+        uses: actions/cache@v4
+        with:
+          path: resources/bin
+          key: binaries-Windows-arm64-${{ hashFiles('binary-versions.json') }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download binaries for ARM64
+        run: npx ts-node scripts/download-binaries.ts --arch arm64
+
+      - name: Get version and build date
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${{ github.ref_name }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION=$(node -p "require('./package.json').version")
+          fi
+          BUILD_DATE=$(date +%Y-%m-%d)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION (Build date: $BUILD_DATE)"
+
+      - name: Update package.json version
+        run: |
+          npm version ${{ steps.version.outputs.version }} --no-git-tag-version --allow-same-version
+          cd release/app && npm version ${{ steps.version.outputs.version }} --no-git-tag-version --allow-same-version
+
+      - name: Download the trust module
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/download-artifact@v4
+        with:
+          name: trust-module
+          path: release/package-trust
+
+      - name: Build application
+        env:
+          BUILD_DATE: ${{ steps.version.outputs.build_date }}
+        run: npm run build
+
+      - name: Package for ARM64
+        run: npx electron-builder --win --arm64 --publish never
+        env:
+          CI: 'true'
+
+      - name: Rename artifact for ARM64
+        shell: pwsh
+        run: |
+          $exeFile = Get-ChildItem -Path "release/build" -Filter "*.exe" | Select-Object -First 1
+          if ($exeFile) {
+            $newName = $exeFile.Name -replace '\.exe$', '-ARM64.exe'
+            Rename-Item -Path $exeFile.FullName -NewName $newName
+            Write-Host "Renamed to: $newName"
+          }
+
+      - name: Read the fuses of the built executable
+        shell: bash
+        run: node scripts/release/read-fuses.mjs "release/build/win-arm64-unpacked/OpenPLC Editor.exe"
+
+      - name: Scan the unpacked output for trust-anchor literals
+        shell: bash
+        run: node scripts/release/scan-trust-literals.mjs --trusted-keys src/backend/shared/utils/vpp/trusted-keys.ts release/build/win-arm64-unpacked
+
+      - name: Upload Windows ARM64 installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-arm64-exe
+          path: release/build/*-ARM64.exe
+          retention-days: 30
+          if-no-files-found: error
+
+  # =============================================================================
+  # Linux Build - x64
+  # =============================================================================
+  build-linux-x64:
+    needs: trust-module
+    runs-on: ubuntu-22.04
+    if: ${{ !cancelled() && (needs.trust-module.result == 'success' || needs.trust-module.result == 'skipped') && (github.event_name == 'push' || inputs.platforms == 'all' || inputs.platforms == 'linux') }}
+    env:
+      OPENPLC_RELEASE_BUILD: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Cache tool binaries
+        uses: actions/cache@v4
+        with:
+          path: resources/bin
+          key: binaries-Linux-x64-${{ hashFiles('binary-versions.json') }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Get version and build date
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${{ github.ref_name }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION=$(node -p "require('./package.json').version")
+          fi
+          BUILD_DATE=$(date +%Y-%m-%d)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION (Build date: $BUILD_DATE)"
+
+      - name: Update package.json version
+        run: |
+          npm version ${{ steps.version.outputs.version }} --no-git-tag-version --allow-same-version
+          cd release/app && npm version ${{ steps.version.outputs.version }} --no-git-tag-version --allow-same-version
+
+      - name: Download the trust module
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/download-artifact@v4
+        with:
+          name: trust-module
+          path: release/package-trust
+
+      - name: Build and package
+        env:
+          BUILD_DATE: ${{ steps.version.outputs.build_date }}
+        run: npm run package
+
+      - name: Read the fuses of the built executable
+        run: node scripts/release/read-fuses.mjs release/build/linux-unpacked/open-plc-editor
+
+      - name: Scan the unpacked output for trust-anchor literals
+        run: node scripts/release/scan-trust-literals.mjs --trusted-keys src/backend/shared/utils/vpp/trusted-keys.ts release/build/linux-unpacked
+
+      - name: Upload Linux x64 AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64-appimage
+          path: release/build/*.AppImage
+          retention-days: 30
+          if-no-files-found: error
+
+  # =============================================================================
+  # Linux Build - ARM64
+  # =============================================================================
+  build-linux-arm64:
+    needs: trust-module
+    runs-on: ubuntu-24.04-arm
+    if: ${{ !cancelled() && (needs.trust-module.result == 'success' || needs.trust-module.result == 'skipped') && (github.event_name == 'push' || inputs.platforms == 'all' || inputs.platforms == 'linux') }}
+    env:
+      OPENPLC_RELEASE_BUILD: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Cache tool binaries
+        uses: actions/cache@v4
+        with:
+          path: resources/bin
+          key: binaries-Linux-arm64-${{ hashFiles('binary-versions.json') }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Get version and build date
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${{ github.ref_name }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION=$(node -p "require('./package.json').version")
+          fi
+          BUILD_DATE=$(date +%Y-%m-%d)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION (Build date: $BUILD_DATE)"
+
+      - name: Update package.json version
+        run: |
+          npm version ${{ steps.version.outputs.version }} --no-git-tag-version --allow-same-version
+          cd release/app && npm version ${{ steps.version.outputs.version }} --no-git-tag-version --allow-same-version
+
+      - name: Download the trust module
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/download-artifact@v4
+        with:
+          name: trust-module
+          path: release/package-trust
+
+      - name: Build application
+        env:
+          BUILD_DATE: ${{ steps.version.outputs.build_date }}
+        run: npm run build
+
+      - name: Package for ARM64
+        run: npx electron-builder --linux AppImage --arm64 --publish never
+        env:
+          CI: 'true'
+
+      - name: Rename artifact for ARM64
+        run: |
+          for f in release/build/*.AppImage; do
+            if [ -f "$f" ]; then
+              newname="${f%.AppImage}-ARM64.AppImage"
+              mv "$f" "$newname"
+              echo "Renamed to: $newname"
+            fi
+          done
+
+      - name: Read the fuses of the built executable
+        run: node scripts/release/read-fuses.mjs release/build/linux-arm64-unpacked/open-plc-editor
+
+      - name: Scan the unpacked output for trust-anchor literals
+        run: node scripts/release/scan-trust-literals.mjs --trusted-keys src/backend/shared/utils/vpp/trusted-keys.ts release/build/linux-arm64-unpacked
+
+      - name: Upload Linux ARM64 AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64-appimage
+          path: release/build/*-ARM64.AppImage
+          retention-days: 30
+          if-no-files-found: error
+
+  # =============================================================================
+  # Packaged checks - the abuse checks on this run's Apple silicon, Windows x64 and Linux x64 installers
+  # =============================================================================
+  packaged-checks:
+    needs: [build-macos, build-windows-x64, build-linux-x64]
+    if: ${{ !cancelled() && needs.build-macos.result == 'success' && needs.build-windows-x64.result == 'success' && needs.build-linux-x64.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            platform: mac
+            artifact: macos-arm64-dmg
+            suffix: '-ARM.dmg'
+          - runner: windows-2022
+            platform: win
+            artifact: windows-x64-exe
+            suffix: '.exe'
+          - runner: ubuntu-22.04
+            platform: linux
+            artifact: linux-x64-appimage
+            suffix: '.AppImage'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      SUFFIX: ${{ matrix.suffix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Get version
+        id: version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION=$(node -p "require('./package.json').version")
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download the installer of this run
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: installers
+
+      - name: Run the packaged checks on the installer
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          shopt -s nullglob
+          INSTALLERS=(installers/*"$SUFFIX")
+          if [ "${#INSTALLERS[@]}" -ne 1 ]; then
+            echo "::error::Expected one *$SUFFIX installer, found ${#INSTALLERS[@]}"
+            exit 1
+          fi
+          mkdir -p reports
+          if [ "$PLATFORM" = linux ]; then
+            chmod +x "${INSTALLERS[0]}"
+            set -- xvfb-run -a
+          fi
+          "$@" node scripts/release/packaged-checks.mjs --platform "$PLATFORM" \
+            --installer "${INSTALLERS[0]}" --version "$VERSION" --allow-prerelease \
+            --positive-control src/backend/editor/package-trust/__tests__/fixtures/com.openplc.fx3u-compatible-2.1.0.vpp \
+            --trusted-keys src/backend/shared/utils/vpp/trusted-keys.ts \
+            --report "reports/packaged-checks-$PLATFORM.json"
+
+      - name: Upload the report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaged-checks-${{ matrix.platform }}
+          path: reports/
+          retention-days: 30
+
+  # =============================================================================
+  # Create GitHub Release
+  # =============================================================================
+  create-release:
+    needs: [build-macos, build-windows-x64, build-windows-arm64, build-linux-x64, build-linux-arm64, packaged-checks, cross-seed]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download the DMG installers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-dmg'
+          path: artifacts
+
+      - name: Download the Windows installers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-exe'
+          path: artifacts
+
+      - name: Download the AppImage installers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-appimage'
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f -name "*" | head -50
+
+      - name: Stage the six installers under their release names
+        run: |
+          mkdir -p upload
+          for f in artifacts/macos-x64-dmg/*.dmg artifacts/macos-arm64-dmg/*.dmg \
+            artifacts/windows-x64-exe/*.exe artifacts/windows-arm64-exe/*.exe \
+            artifacts/linux-x64-appimage/*.AppImage artifacts/linux-arm64-appimage/*.AppImage; do
+            cp "$f" "upload/$(basename "$f" | tr ' ' '.')"
+          done
+          ls -l upload
+
+      - name: Check the upload set
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: node scripts/release/check-upload-set.mjs --version "$VERSION" --allow-prerelease upload
+
+      - name: Determine if prerelease
+        id: prerelease
+        run: |
+          if [[ "${{ github.ref }}" == *"beta"* ]] || [[ "${{ github.ref }}" == *"alpha"* ]] || [[ "${{ github.ref }}" == *"rc"* ]]; then
+            echo "flag=--prerelease" >> $GITHUB_OUTPUT
+          else
+            echo "flag=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "OpenPLC Editor v${{ steps.version.outputs.version }}" \
+            --generate-notes \
+            ${{ steps.prerelease.outputs.flag }} \
+            upload/*.dmg \
+            upload/*.exe \
+            upload/*.AppImage

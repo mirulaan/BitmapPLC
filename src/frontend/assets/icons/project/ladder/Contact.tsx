@@ -1,0 +1,47 @@
+import { ComponentPropsWithoutRef } from 'react'
+
+import { cn } from '../../../../utils/cn'
+type IContactIconProps = ComponentPropsWithoutRef<'svg'> & {
+  size?: 'sm' | 'md' | 'lg'
+  /** Draws the contact's modifier: a diagonal when negated, P or N for a rising or falling edge. */
+  modifier?: 'negated' | 'rising' | 'falling'
+}
+const sizeClasses = {
+  sm: 'w-5 h-5',
+  md: 'w-6 h-6',
+  lg: 'w-12 h-12',
+}
+
+export default function ContactIcon(props: IContactIconProps) {
+  const { className, size = 'sm', modifier, ...res } = props
+  // An edge contact opens its bars so the P or N inside stays readable.
+  const spread = modifier === 'rising' || modifier === 'falling' ? 2.5 : 0
+  const left = 9.44922 - spread
+  const right = 15.4492 + spread
+
+  return (
+    <svg
+      className={cn(sizeClasses[size], className)}
+      viewBox='0 0 24 24'
+      fill='none'
+      xmlns='http://www.w3.org/2000/svg'
+      {...res}
+    >
+      <path
+        opacity='0.4'
+        d='M5.00065 0.333984H19.0007C21.578 0.333984 23.6673 2.42332 23.6673 5.00065V19.0007C23.6673 21.578 21.578 23.6673 19.0007 23.6673H5.00065C2.42332 23.6673 0.333984 21.578 0.333984 19.0007V5.00065C0.333984 2.42332 2.42332 0.333984 5.00065 0.333984Z'
+        fill='#B4D0FE'
+      />
+      <path d={`M${right - 0.75} 12H20.6992`} stroke='#B4D0FE' strokeWidth='1.5' />
+      <path d={`M3.69922 12H${left + 0.75}`} stroke='#B4D0FE' strokeWidth='1.5' />
+      <line x1={left} y1='7' x2={left} y2='17' stroke='#B4D0FE' strokeWidth='1.5' />
+      <line x1={right} y1='7' x2={right} y2='17' stroke='#B4D0FE' strokeWidth='1.5' />
+      {modifier === 'negated' && <line x1='10.7' y1='15.6' x2='14.2' y2='8.4' stroke='#B4D0FE' strokeWidth='1.5' />}
+      {(modifier === 'rising' || modifier === 'falling') && (
+        <text x='12.45' y='14.7' textAnchor='middle' fontSize='7.5' fontWeight='700' fill='#B4D0FE'>
+          {modifier === 'rising' ? 'P' : 'N'}
+        </text>
+      )}
+    </svg>
+  )
+}

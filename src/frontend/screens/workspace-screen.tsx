@@ -1,0 +1,1062 @@
+import * as Tabs from '@radix-ui/react-tabs'
+import { useHoldHmiToolchain } from '@root/frontend/hooks/use-hold-hmi-toolchain'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ImperativePanelHandle } from 'react-resizable-panels'
+import { useShallow } from 'zustand/react/shallow'
+
+import { isRemoteProjectPath, projectCapabilities } from '../../middleware/shared/ports/types'
+import {
+  useCapabilities,
+  useChatPanel,
+  useDebugger,
+  useDevice,
+  usePlatform,
+  useProject,
+} from '../../middleware/shared/providers'
+import { ExitIcon } from '../assets/icons/interface/Exit'
+import { ClearConsoleButton } from '../components/_atoms/buttons/console/clear-console'
+import { BranchStatusBar } from '../components/_features/[workspace]/branches'
+import { BranchMergeView } from '../components/_features/[workspace]/branches/branch-merge-view'
+import { CommitHistoryView } from '../components/_features/[workspace]/commit-history'
+import { DataTypeEditor } from '../components/_features/[workspace]/data-type'
+import { DeviceEditor } from '../components/_features/[workspace]/editor/device'
+import {
+  EtherCATDeviceEditor,
+  EtherCATEditor,
+  EtherCATModuleEditor,
+} from '../components/_features/[workspace]/editor/device/ethercat'
+import { RemoteDeviceEditor } from '../components/_features/[workspace]/editor/device/remote-device'
+import { DiagnosticsEditor } from '../components/_features/[workspace]/editor/diagnostics'
+import { DiffViewerEditor } from '../components/_features/[workspace]/editor/diff-viewer'
+import { GraphicalEditor } from '../components/_features/[workspace]/editor/graphical'
+import { HmiScreenDesigner, HmiSettingsEditor, HmiWidgetEditor } from '../components/_features/[workspace]/editor/hmi'
+import { LibraryManagerEditor } from '../components/_features/[workspace]/editor/library-manager'
+import { LibraryManifestEditor } from '../components/_features/[workspace]/editor/library-manifest'
+import { MonacoEditor } from '../components/_features/[workspace]/editor/monaco'
+import { PackageManagerEditor } from '../components/_features/[workspace]/editor/package-manager'
+import { PersistentStorageEditor } from '../components/_features/[workspace]/editor/persistent-storage'
+import { ResourcesEditor } from '../components/_features/[workspace]/editor/resource-editor'
+import { ModbusServerEditor } from '../components/_features/[workspace]/editor/server/modbus-server'
+import { OpcUaServerEditor } from '../components/_features/[workspace]/editor/server/opcua-server'
+import { S7CommServerEditor } from '../components/_features/[workspace]/editor/server/s7comm-server'
+import { UserManagementEditor } from '../components/_features/[workspace]/editor/user-management'
+import { VendorScreenTabs } from '../components/_features/[workspace]/editor/vendor-screen/vendor-screen-tabs'
+import { GlobalVariableListEditor } from '../components/_features/[workspace]/global-variable-list'
+import { Search } from '../components/_features/[workspace]/search'
+import { SourceControlPanel } from '../components/_features/[workspace]/source-control'
+import { HostLockBoundary } from '../components/_molecules/editing-lock-boundary'
+import { VariablesPanel } from '../components/_molecules/variables-panel'
+import { BottomPanelHideButton, BottomPanelStrip, BottomPanelTabTrigger } from '../components/_organisms/bottom-panel'
+import {
+  BOTTOM_PANEL_DEFAULT_SIZE,
+  type BottomPanelTabId,
+  isBottomPanelTabId,
+  visibleBottomPanelTabs,
+} from '../components/_organisms/bottom-panel/tabs'
+import { Console as ConsoleComponent } from '../components/_organisms/console'
+import { ConsoleFilters } from '../components/_organisms/console/filters'
+import { Debugger } from '../components/_organisms/debugger'
+import { Explorer } from '../components/_organisms/explorer'
+import { Navigation } from '../components/_organisms/navigation'
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '../components/_organisms/panel'
+import { PlcLogs } from '../components/_organisms/plc-logs'
+import { PlcLogsFilters } from '../components/_organisms/plc-logs/filters'
+import { VariablesEditor } from '../components/_organisms/variables-editor'
+import { WorkspaceActivityBar } from '../components/_organisms/workspace-activity-bar'
+import { WorkspaceMainContent } from '../components/_templates/[workspace]/main-content'
+import { WorkspaceSideContent } from '../components/_templates/[workspace]/side-content'
+import { useBottomPanelShortcut } from '../hooks/use-bottom-panel-shortcut'
+import {
+  useDebugBoolValuesMap,
+  useDebugForcedVariablesMap,
+  useDebugNonBoolValuesMap,
+  useIsDebuggerVisible,
+} from '../hooks/use-debug-value'
+import { useDeviceConnectionMonitor } from '../hooks/use-device-connection-monitor'
+import { useDevicePlcState } from '../hooks/use-device-plc-state'
+import { useRestoreProjectTargetDevice } from '../hooks/use-restore-project-target-device'
+import { useRuntimeAccount } from '../hooks/use-runtime-account'
+import { useRuntimeCommercialLicenseOwner } from '../hooks/use-runtime-commercial-license'
+import { useRuntimePolling } from '../hooks/use-runtime-polling'
+import { forceDebugVariable, releaseDebugVariable } from '../services/debug-force-variable'
+import { buildAllProjectFileContentsPure } from '../services/save-actions'
+import { useOpenPLCStore, useOpenPLCStoreApi } from '../store'
+import { cn } from '../utils/cn'
+import { buildGlobalCompositeKey, GLOBAL_CONFIG_NAME } from '../utils/debug-variable-finder'
+import { toast } from '../utils/toast'
+
+const WorkspaceScreen = () => {
+  const store = useOpenPLCStoreApi()
+  const capabilities = useCapabilities()
+  const ChatPanel = useChatPanel()
+  const debuggerPort = useDebugger()
+  const device = useDevice()
+  const project = useProject()
+
+  // STABLE: action references (never change)
+  const { toggleCollapse, clearPlcLogs, toggleDebugExpandedNode, setDebugGraphList } = useOpenPLCStore(
+    useCallback((s) => s.workspaceActions, []),
+  )
+  const { setAvailableOptions } = useOpenPLCStore(useCallback((s) => s.deviceActions, []))
+  const addLog = useOpenPLCStore(useCallback((s) => s.consoleActions.addLog, []))
+
+  // RARE: UI state (changes on user interaction, not during debug polling)
+  const tabs = useOpenPLCStore(useCallback((s) => s.tabs, []))
+  const editor = useOpenPLCStore(useCallback((s) => s.editor, []))
+  // Multi-mounted with CSS-toggled visibility to keep Monaco / ReactFlow instances alive across tab switches.
+  const editors = useOpenPLCStore(useCallback((s) => s.editors, []))
+  const searchResults = useOpenPLCStore(useCallback((s) => s.searchResults, []))
+  const projectPous = useOpenPLCStore(useCallback((s) => s.project.data.pous, []))
+  // The library-debug harness POU is added to the list, not substituted, so a mid-session debug-flag change still applies.
+  const debugHarness = useOpenPLCStore(useCallback((s) => s.workspace.debugHarness, []))
+  const pous = useMemo(
+    () => (debugHarness ? [...projectPous, debugHarness.programPou] : projectPous),
+    [projectPous, debugHarness],
+  )
+  const projectPath = useOpenPLCStore(useCallback((s) => s.project.meta.path, []))
+  const projectType = useOpenPLCStore(useCallback((s) => s.project.meta.type, []))
+  const projectCaps = projectCapabilities({ type: projectType })
+
+  // RARE: workspace UI + debug session state (grouped with shallow)
+  const {
+    isCollapsed,
+    isPlcLogsVisible,
+    plcLogs,
+    debugVariableTree,
+    debugVariableIndexes,
+    debugExpandedNodes,
+    fbSelectedInstance,
+    fbDebugInstances,
+  } = useOpenPLCStore(
+    useShallow((s) => ({
+      isCollapsed: s.workspace.isCollapsed,
+      isPlcLogsVisible: s.workspace.isPlcLogsVisible,
+      plcLogs: s.workspace.plcLogs,
+      debugVariableTree: s.workspace.debugVariableTree,
+      debugVariableIndexes: s.workspace.debugVariableIndexes,
+      debugExpandedNodes: s.workspace.debugExpandedNodes,
+      fbSelectedInstance: s.workspace.fbSelectedInstance,
+      fbDebugInstances: s.workspace.fbDebugInstances,
+    })),
+  )
+
+  // RARE: AI state (grouped with shallow)
+  const {
+    isChatOpen,
+    isEnabled: isAIEnabled,
+    hasConsented: hasAIConsented,
+  } = useOpenPLCStore(
+    useShallow((s) => ({
+      isChatOpen: s.ai.isChatOpen,
+      isEnabled: s.ai.isEnabled,
+      hasConsented: s.ai.hasConsented,
+    })),
+  )
+
+  const { activePanel, pendingChangesCount, historyView, mergeView, rawLoadedContent, loadedSerialized } =
+    useOpenPLCStore(
+      useShallow((s) => ({
+        activePanel: s.versionControl.activePanel,
+        pendingChangesCount: s.versionControl.pendingChangesCount,
+        historyView: s.versionControl.historyView,
+        mergeView: s.versionControl.mergeView,
+        rawLoadedContent: s.versionControl.rawLoadedContent,
+        loadedSerialized: s.versionControl.loadedSerialized,
+      })),
+    )
+  const { setActivePanel, closeHistoryView, closeMergeView, initBaseline } = useOpenPLCStore(
+    useCallback((s) => s.versionControlActions, []),
+  )
+  const sharedWorkspaceActions = useOpenPLCStore(useCallback((s) => s.sharedWorkspaceActions, []))
+
+  const isDebuggerVisible = useIsDebuggerVisible()
+  const debugBoolValues = useDebugBoolValuesMap()
+  const debugNonBoolValues = useDebugNonBoolValuesMap()
+  const debugForcedVariables = useDebugForcedVariablesMap()
+
+  // VC needs host support, project-type support, and a project path on the server (desktop: only Edge projects qualify; web always does).
+  const hasVersionControl =
+    capabilities.hasVersionControl && projectCaps.hasVersionControl && isRemoteProjectPath(projectPath)
+
+  // Establishes the VC sync baseline on load, keyed on `loadedSerialized`'s identity (not
+  // `projectPath`) so a branch switch/restore/stash on the same project still re-baselines.
+  // Skipped if the web router already populated it before mount.
+  useEffect(() => {
+    if (!projectPath) {
+      return
+    }
+
+    if (Object.keys(loadedSerialized).length > 0) {
+      return
+    }
+
+    const baselineContent = buildAllProjectFileContentsPure(store)
+
+    initBaseline({
+      initialPending: [],
+      baselineContent,
+      rawLoadedContent,
+      loadedSerialized: baselineContent,
+    })
+  }, [projectPath, rawLoadedContent, loadedSerialized, initBaseline, store])
+
+  useRuntimePolling()
+  useRuntimeAccount()
+  useHoldHmiToolchain()
+  useRuntimeCommercialLicenseOwner()
+  useRestoreProjectTargetDevice()
+  // Mirrors a baremetal target's run/stop state from the held device link's existing liveness tick (no timer of its own).
+  useDevicePlcState()
+  useDeviceConnectionMonitor()
+
+  const allDebugVariables = useMemo(() => {
+    const rows = pous.flatMap((pou) => {
+      const variables = pou.interface?.variables ?? []
+      return variables
+        .filter((v) => v.debug === true)
+        .map((v) => {
+          let typeValue = ''
+          if (v.type.definition === 'base-type') {
+            typeValue = v.type.value
+          } else if (v.type.definition === 'user-data-type') {
+            typeValue = v.type.value
+          } else if (v.type.definition === 'array') {
+            typeValue = v.type.value
+          } else if (v.type.definition === 'derived') {
+            typeValue = v.type.value
+          }
+
+          let compositeKey: string
+          let displayName: string
+          let rowPouName = pou.name
+          if (v.class === 'external') {
+            // A VAR_EXTERNAL resolves to the shared global's canonical key, so every reference collapses into one watch (deduped below).
+            compositeKey = buildGlobalCompositeKey(v.name)
+            displayName = `${GLOBAL_CONFIG_NAME}.${v.name}`
+            rowPouName = GLOBAL_CONFIG_NAME
+          } else if (pou.pouType === 'function-block') {
+            const fbTypeKey = pou.name.toUpperCase()
+            const selectedKey = fbSelectedInstance.get(fbTypeKey)
+            const instances = fbDebugInstances.get(fbTypeKey) ?? []
+            const selectedInstance = instances.find((inst) => inst.key === selectedKey)
+
+            if (selectedInstance) {
+              compositeKey = `${selectedInstance.programName}:${selectedInstance.fbVariableName}.${v.name}`
+              displayName = `${selectedInstance.programName}.${selectedInstance.fbVariableName}.${v.name}`
+            } else {
+              compositeKey = `${pou.name}:${v.name}`
+              displayName = v.name
+            }
+          } else {
+            compositeKey = `${pou.name}:${v.name}`
+            displayName = v.name
+          }
+
+          const variableValue = debugBoolValues.get(compositeKey) ?? debugNonBoolValues.get(compositeKey)
+          const displayValue = variableValue !== undefined ? variableValue : '-'
+
+          return {
+            pouName: rowPouName,
+            name: displayName,
+            type: typeValue,
+            value: displayValue,
+            compositeKey,
+          }
+        })
+    })
+
+    // Collapse duplicates by composite key — a global referenced via VAR_EXTERNAL
+    // from several POUs (and mirrored by the debug-flag sync) yields one row.
+    const byKey = new Map<string, (typeof rows)[number]>()
+    for (const row of rows) {
+      if (!byKey.has(row.compositeKey)) byKey.set(row.compositeKey, row)
+    }
+    return Array.from(byKey.values())
+  }, [pous, debugBoolValues, debugNonBoolValues, fbSelectedInstance, fbDebugInstances])
+
+  // Deduplicate names with POU prefix when conflicts exist
+  const debugVariables = useMemo(() => {
+    const nameOccurrences = new Map<string, number>()
+    allDebugVariables.forEach((v) => {
+      nameOccurrences.set(v.name, (nameOccurrences.get(v.name) || 0) + 1)
+    })
+
+    return allDebugVariables.map((v) => {
+      const hasConflict = nameOccurrences.get(v.name)! > 1
+      return {
+        name: hasConflict ? `[${v.pouName}] ${v.name}` : v.name,
+        type: v.type,
+        value: v.value,
+        compositeKey: v.compositeKey,
+      }
+    })
+  }, [allDebugVariables])
+
+  // Filter debug variable tree to only include watched or forced keys
+  const filteredDebugVariableTree = useMemo(() => {
+    const watchedCompositeKeys = new Set<string>(allDebugVariables.map((v) => v.compositeKey))
+    const forcedKeys = Array.from(debugForcedVariables.keys())
+    const allKeys = new Set([...watchedCompositeKeys, ...forcedKeys])
+    return new Map(Array.from(debugVariableTree.entries()).filter(([key]) => allKeys.has(key)))
+  }, [allDebugVariables, debugForcedVariables, debugVariableTree])
+
+  const handleForceVariable = useCallback(
+    async (
+      compositeKey: string,
+      variableType: string,
+      value?: boolean,
+      valueBuffer?: Uint8Array,
+      lookupKey?: string,
+    ): Promise<void> => {
+      const keyForIndexLookup = lookupKey ?? compositeKey
+      const variableIndex = debugVariableIndexes.get(keyForIndexLookup)
+      if (variableIndex === undefined) return
+
+      if (!debuggerPort.isConnected()) return
+
+      if (value === undefined && valueBuffer === undefined) {
+        await releaseDebugVariable(store, debuggerPort, compositeKey, variableIndex)
+      } else {
+        const buffer = valueBuffer ?? new Uint8Array([value ? 1 : 0])
+        // variableType lets the wire-endianness swap skip BOOL/STRING payloads (see services/debug-force-variable).
+        await forceDebugVariable(store, debuggerPort, compositeKey, variableIndex, buffer, value ?? true, variableType)
+      }
+    },
+    [debugVariableIndexes, debuggerPort, store],
+  )
+
+  const [graphList, _setGraphList] = useState<string[]>([])
+  const setGraphList = useCallback(
+    (update: string[] | ((prev: string[]) => string[])) => {
+      _setGraphList((prev) => {
+        const next = typeof update === 'function' ? update(prev) : update
+        setDebugGraphList(next)
+        return next
+      })
+    },
+    [setDebugGraphList],
+  )
+  const [isVariablesPanelCollapsed, setIsVariablesPanelCollapsed] = useState(false)
+
+  // Re-reads the project after a branch switch or restore rewrites the working tree server-side.
+  // `whenStale` lets the caller distinguish "operation succeeded, reload didn't" from a real failure.
+  const reloadOpenProject = useCallback(
+    async (whenStale: string): Promise<boolean> => {
+      if (!projectPath) return false
+
+      // Handled here, not left to the caller: two of three callers discard the reload promise with `void`.
+      let result: Awaited<ReturnType<typeof project.openProjectByPath>>
+
+      try {
+        result = await project.openProjectByPath(projectPath)
+      } catch {
+        toast({ title: 'Failed to reload project', description: whenStale, variant: 'fail' })
+        return false
+      }
+
+      if (result.success && result.data) {
+        sharedWorkspaceActions.handleOpenProjectResponse(result.data)
+        return true
+      }
+
+      toast({ title: 'Failed to reload project', description: whenStale, variant: 'fail' })
+      return false
+    },
+    [projectPath, project, sharedWorkspaceActions],
+  )
+
+  const handleBranchSwitch = useCallback(
+    async (branchName: string) => {
+      if (!projectPath) return
+      try {
+        if (await reloadOpenProject('The branch was switched but the project could not be reloaded.')) {
+          toast({
+            title: 'Branch switched',
+            description: `Now on branch: ${branchName}`,
+            variant: 'default',
+          })
+        }
+      } catch (error) {
+        console.error('[WorkspaceScreen] Failed to switch branch:', error)
+        toast({
+          title: 'Failed to switch branch',
+          description: error instanceof Error ? error.message : 'Unknown error',
+          variant: 'fail',
+        })
+      }
+    },
+    [projectPath, reloadOpenProject],
+  )
+
+  type PanelMethods = {
+    collapse: () => void
+    expand: () => void
+  } & ImperativePanelHandle
+
+  const panelRef = useRef<ImperativePanelHandle | null>(null)
+  const leftPanelRef = useRef<PanelMethods | null>(null)
+  const workspacePanelRef = useRef<PanelMethods | null>(null)
+  const consolePanelRef = useRef<PanelMethods | null>(null)
+  const [activeTab, setActiveTab] = useState<BottomPanelTabId>('console')
+  const [isBottomPanelOpen, setIsBottomPanelOpen] = useState(false)
+  const bottomPanelWasOpenedRef = useRef(false)
+  const bottomPanelOpenBeforePerspectiveRef = useRef(false)
+  const previousIsCollapsedRef = useRef(isCollapsed)
+  const consoleFollowRequestId = useOpenPLCStore((state) => state.followRequestId)
+  const searchRevealRequestId = useOpenPLCStore((state) => state.revealRequestId)
+  const hasSearchResults = searchResults.length > 0
+  const bottomPanelTabs = visibleBottomPanelTabs({
+    debug: isDebuggerVisible,
+    search: hasSearchResults,
+    plcLogs: isPlcLogsVisible,
+  })
+
+  const togglePanel = () => {
+    if (panelRef.current) {
+      panelRef.current.resize(25)
+    }
+  }
+
+  const openBottomPanel = useCallback((tab?: BottomPanelTabId) => {
+    if (tab) setActiveTab(tab)
+    consolePanelRef.current?.expand(bottomPanelWasOpenedRef.current ? undefined : BOTTOM_PANEL_DEFAULT_SIZE)
+    bottomPanelWasOpenedRef.current = true
+  }, [])
+
+  const hideBottomPanel = useCallback(() => consolePanelRef.current?.collapse(), [])
+
+  const toggleBottomPanel = useCallback(() => {
+    if (consolePanelRef.current?.isCollapsed() ?? true) openBottomPanel()
+    else hideBottomPanel()
+  }, [openBottomPanel, hideBottomPanel])
+
+  useBottomPanelShortcut(toggleBottomPanel)
+
+  // Every project opens with the panel hidden, also when the workspace stays mounted across projects.
+  useEffect(() => {
+    hideBottomPanel()
+    setActiveTab('console')
+    bottomPanelWasOpenedRef.current = false
+  }, [projectPath, hideBottomPanel])
+
+  useEffect(() => {
+    if (!hasSearchResults) setActiveTab((prev) => (prev === 'search' ? 'console' : prev))
+  }, [hasSearchResults])
+
+  // Each Find in Project that found something shows its results. Skips the initial value (0).
+  useEffect(() => {
+    if (searchRevealRequestId === 0) return
+    openBottomPanel('search')
+  }, [searchRevealRequestId, openBottomPanel])
+
+  useEffect(() => {
+    if (!isPlcLogsVisible) {
+      setActiveTab((prev) => (prev === 'plc-logs' ? 'console' : prev))
+    }
+  }, [isPlcLogsVisible])
+
+  useEffect(() => {
+    if (isDebuggerVisible) {
+      openBottomPanel('debug')
+    } else {
+      setActiveTab((prev) => (prev === 'debug' ? 'console' : prev))
+    }
+  }, [isDebuggerVisible, openBottomPanel])
+
+  // Switch Perspective hides the side and bottom panels, and restores the bottom one only if it was open before.
+  useEffect(() => {
+    if (previousIsCollapsedRef.current === isCollapsed) return
+    previousIsCollapsedRef.current = isCollapsed
+    const action = isCollapsed ? 'collapse' : 'expand'
+    ;[leftPanelRef, workspacePanelRef].forEach((ref) => {
+      if (ref.current && typeof ref.current[action] === 'function') {
+        ref.current[action]()
+      }
+    })
+    if (isCollapsed) {
+      bottomPanelOpenBeforePerspectiveRef.current = !(consolePanelRef.current?.isCollapsed() ?? true)
+      hideBottomPanel()
+    } else if (bottomPanelOpenBeforePerspectiveRef.current) {
+      openBottomPanel()
+    }
+  }, [isCollapsed, openBottomPanel, hideBottomPanel])
+
+  // A build (or other producer) requested the console. Skips the initial value (0) so it never forces the console open on first render.
+  useEffect(() => {
+    if (consoleFollowRequestId === 0) return
+    openBottomPanel('console')
+  }, [consoleFollowRequestId, openBottomPanel])
+
+  // `setAvailableOptions` owns the alias sync for the active target once boards land; the project's saved board is never overridden on load.
+  useEffect(() => {
+    const loadAvailableBoards = async () => {
+      try {
+        const boardsMap = await device.getAvailableBoards()
+        setAvailableOptions({ availableBoards: boardsMap })
+      } catch (error) {
+        console.error('Failed to load boards data:', error)
+      }
+    }
+
+    void loadAvailableBoards()
+  }, [device, setAvailableOptions])
+
+  const packagesPort = usePlatform().packages
+  useEffect(() => {
+    if (!packagesPort) return
+
+    const unsubOpen = packagesPort.onOpenManager(() => {
+      const { tabsActions, editorActions } = store.getState()
+      const tab = {
+        name: 'Package Manager',
+        path: '/package-manager',
+        elementType: { type: 'package-manager' as const },
+      }
+      tabsActions.updateTabs(tab)
+      const existing = editorActions.getEditorFromEditors(tab.name)
+      if (!existing) {
+        const model = { type: 'plc-package-manager' as const, meta: { name: 'Package Manager' } }
+        editorActions.addModel(model)
+        editorActions.setEditor(model)
+      } else {
+        editorActions.setEditor(existing)
+      }
+    })
+
+    const unsubBoards = packagesPort.onBoardsUpdated(() => {
+      void device.getAvailableBoards().then((boardsMap) => {
+        setAvailableOptions({ availableBoards: boardsMap })
+      })
+    })
+
+    return () => {
+      unsubOpen()
+      unsubBoards()
+    }
+  }, [packagesPort, device, setAvailableOptions, store])
+
+  // Which vPLC the IDE is pointed at decides which vendor package it can use:
+  // a vPLC runs the package it was created with. Telling the package layer is
+  // what loads that archive and refreshes the board list; with no vPLC
+  // selected there is no vendor board to offer. Inert on the desktop, which
+  // connects to a board directly and never to a vPLC.
+  const selectedDevice = useOpenPLCStore((state) => state.runtimeConnection.selectedDevice)
+  useEffect(() => {
+    if (!packagesPort) return
+    void packagesPort.setTargetDevice(
+      selectedDevice ? { deviceId: selectedDevice.deviceId, vpp: selectedDevice.vpp ?? null } : null,
+    )
+  }, [packagesPort, selectedDevice])
+
+  useEffect(() => {
+    if (!packagesPort) return
+    return packagesPort.onStartupNotices((notices) => {
+      for (const notice of notices) addLog({ level: notice.level, message: notice.message })
+    })
+  }, [packagesPort, addLog])
+
+  // Re-verifies installed VPP package signatures on project open and drops any that fail (blocks a
+  // locally-crafted/unsigned .vpp bypassing the signed import flow). No-op on web (`packagesPort` is undefined).
+  useEffect(() => {
+    if (!packagesPort || !projectPath) return
+    let cancelled = false
+    void packagesPort.verifyInstalledSignatures().then((removed) => {
+      if (cancelled) return
+      for (const packageId of removed) {
+        addLog({
+          level: 'warning',
+          message: `Removed untrusted VPP package "${packageId}": its signature is missing or invalid.`,
+        })
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [packagesPort, projectPath, addLog])
+
+  return (
+    <div className='flex h-full w-full flex-col overflow-hidden bg-brand-dark dark:bg-neutral-950'>
+      <div className='flex min-h-0 flex-1 overflow-hidden'>
+        <WorkspaceSideContent>
+          <WorkspaceActivityBar
+            defaultActivityBar={{
+              zoom: {
+                onClick: () => void toggleCollapse(),
+              },
+            }}
+            explorer={
+              hasVersionControl
+                ? {
+                    isActive: activePanel === 'explorer',
+                    onClick: () => setActivePanel('explorer'),
+                  }
+                : undefined
+            }
+            sourceControl={
+              hasVersionControl
+                ? {
+                    isActive: activePanel === 'source-control',
+                    pendingCount: pendingChangesCount,
+                    onClick: () => setActivePanel('source-control'),
+                  }
+                : undefined
+            }
+          />
+        </WorkspaceSideContent>
+        <WorkspaceMainContent>
+          <ResizablePanelGroup
+            id='mainContentPanelGroup'
+            direction='horizontal'
+            className='relative flex h-full w-full'
+          >
+            {/* Must stay mounted: swapping the ResizablePanel itself makes react-resizable-panels re-normalize and grow the sidebar. */}
+            <ResizablePanel
+              ref={leftPanelRef}
+              id='leftPanel'
+              order={1}
+              collapsible={true}
+              minSize={13}
+              defaultSize={16}
+              maxSize={80}
+              className="flex h-full w-full max-w-lg flex-col overflow-auto rounded-lg border-2 border-inherit border-neutral-200 bg-white data-[panel-size='0.0']:hidden dark:border-neutral-850 dark:bg-neutral-950"
+            >
+              {hasVersionControl && activePanel === 'source-control' ? (
+                <SourceControlPanel projectId={projectPath} />
+              ) : (
+                <Explorer />
+              )}
+            </ResizablePanel>
+            <ResizableHandle
+              id='workspaceHandle'
+              hitAreaMargins={{ coarse: 12, fine: 3 }}
+              className='z-[99] my-[2px] w-[4px] py-2 transition-colors duration-200 data-[resize-handle-active="pointer"]:bg-brand-light data-[resize-handle-state="hover"]:bg-brand-light data-[resize-handle-active="pointer"]:dark:bg-neutral-700 data-[resize-handle-state="hover"]:dark:bg-neutral-700'
+            />
+            <ResizablePanel
+              id='workspacePanel'
+              order={2}
+              defaultSize={68}
+              minSize={50}
+              className='flex h-full min-h-0 overflow-hidden'
+            >
+              <div
+                id='workspaceContentPanel'
+                className='flex h-full min-h-0 flex-1 grow flex-col gap-2 overflow-hidden'
+              >
+                {tabs.length > 0 && <Navigation />}
+                <ResizablePanelGroup id='editorPanelGroup' className={`flex h-full gap-2`} direction='vertical'>
+                  <ResizablePanel
+                    id='editorPanel'
+                    order={1}
+                    minSize={15}
+                    defaultSize={100}
+                    className={cn(
+                      'relative  flex flex-1 grow flex-col overflow-hidden rounded-lg border-2 border-neutral-200 bg-white px-4 py-4 dark:border-neutral-800 dark:bg-neutral-950',
+                      {
+                        'py-0 pb-4': isVariablesPanelCollapsed,
+                      },
+                    )}
+                  >
+                    {isVariablesPanelCollapsed && (
+                      <div className='flex w-full justify-center'>
+                        <button
+                          className='flex w-auto items-center rounded-b-lg border-brand bg-neutral-50 px-2 py-1 dark:bg-neutral-900'
+                          onClick={togglePanel}
+                        >
+                          <p className='text-xs font-medium text-brand-medium dark:text-brand-light'>Expand Table</p>
+                          <ExitIcon
+                            size='sm'
+                            className='-rotate-90 select-none fill-brand-medium  stroke-brand dark:fill-brand-light dark:stroke-brand-light'
+                          />
+                        </button>
+                      </div>
+                    )}
+
+                    {tabs.length > 0 ? (
+                      <>
+                        {/* Singleton editor types (at most one tab per project) remount on switch safely — no per-instance state to lose. */}
+                        {editor['type'] === 'plc-resource' && <ResourcesEditor />}
+                        {editor['type'] === 'plc-device' && <DeviceEditor />}
+                        {editor['type'] === 'plc-remote-device' && editor.meta.protocol === 'ethercat' && (
+                          <EtherCATEditor />
+                        )}
+                        {editor['type'] === 'plc-remote-device' && editor.meta.protocol !== 'ethercat' && (
+                          <RemoteDeviceEditor />
+                        )}
+                        {editor['type'] === 'plc-server' && editor.meta.protocol === 'modbus-tcp' && (
+                          <ModbusServerEditor />
+                        )}
+                        {editor['type'] === 'plc-server' && editor.meta.protocol === 's7comm' && <S7CommServerEditor />}
+                        {editor['type'] === 'plc-server' && editor.meta.protocol === 'opcua' && <OpcUaServerEditor />}
+                        {editor['type'] === 'plc-diagnostics' && <DiagnosticsEditor />}
+                        {editor['type'] === 'plc-package-manager' && <PackageManagerEditor />}
+                        {editor['type'] === 'plc-library-manager' && <LibraryManagerEditor />}
+                        {editor['type'] === 'plc-user-management' && (
+                          <HostLockBoundary type={editor['type']}>
+                            <UserManagementEditor />
+                          </HostLockBoundary>
+                        )}
+                        {editor['type'] === 'plc-persistent-storage' && (
+                          <HostLockBoundary type={editor['type']}>
+                            <PersistentStorageEditor />
+                          </HostLockBoundary>
+                        )}
+                        {editor['type'] === 'plc-library-manifest' && <LibraryManifestEditor />}
+                        {editor['type'] === 'plc-hmi' &&
+                          (editor.meta.kind === 'screen' ? (
+                            <HmiScreenDesigner key={`screen-${editor.meta.name}`} name={editor.meta.name} />
+                          ) : (
+                            <HmiWidgetEditor key={`widget-${editor.meta.name}`} name={editor.meta.name} />
+                          ))}
+                        {editor['type'] === 'plc-hmi-settings' && (
+                          <HostLockBoundary type={editor['type']}>
+                            <HmiSettingsEditor />
+                          </HostLockBoundary>
+                        )}
+                        {editor['type'] === 'diff-viewer' && <DiffViewerEditor />}
+
+                        <VendorScreenTabs />
+
+                        {/* Multi-instance (one tab per deviceId), kept mounted so each device's view state survives tab switches. */}
+                        {editors
+                          .filter((m) => m.type === 'plc-ethercat-device')
+                          .map((model) => {
+                            const isActive =
+                              editor.type === 'plc-ethercat-device' && editor.meta.deviceId === model.meta.deviceId
+                            return (
+                              <div key={model.meta.deviceId} className={cn('h-full w-full', !isActive && 'hidden')}>
+                                <EtherCATDeviceEditor busName={model.meta.busName} deviceId={model.meta.deviceId} />
+                              </div>
+                            )
+                          })}
+
+                        {editors
+                          .filter((m) => m.type === 'plc-ethercat-module')
+                          .map((model) => {
+                            const isActive =
+                              editor.type === 'plc-ethercat-module' && editor.meta.moduleId === model.meta.moduleId
+                            return (
+                              <div
+                                key={`${model.meta.deviceId}:${model.meta.moduleId}`}
+                                className={cn('h-full w-full', !isActive && 'hidden')}
+                              >
+                                <EtherCATModuleEditor
+                                  busName={model.meta.busName}
+                                  deviceId={model.meta.deviceId}
+                                  moduleId={model.meta.moduleId}
+                                />
+                              </div>
+                            )
+                          })}
+
+                        {/* Multi-instance (one tab per data type); DataTypeEditor reads its own type by name, so multi-mount is safe. */}
+                        {editors.some((m) => m.type === 'plc-datatype') && (
+                          <div
+                            aria-label='Datatypes editor container'
+                            className={cn(
+                              'flex h-full w-full flex-1 gap-2',
+                              editor.type !== 'plc-datatype' && 'hidden',
+                            )}
+                          >
+                            {editors
+                              .filter((m) => m.type === 'plc-datatype')
+                              .map((model) => {
+                                const isActive = editor.type === 'plc-datatype' && editor.meta.name === model.meta.name
+                                return (
+                                  <div key={model.meta.name} className={cn('h-full w-full', !isActive && 'hidden')}>
+                                    <DataTypeEditor dataTypeName={model.meta.name} />
+                                  </div>
+                                )
+                              })}
+                          </div>
+                        )}
+
+                        {/* Multi-instance, same pattern: each reads its own list by name, so every open list stays mounted safely. */}
+                        {editors.some((m) => m.type === 'plc-global-variable-list') && (
+                          <div
+                            aria-label='Global variable lists editor container'
+                            className={cn(
+                              'flex h-full w-full flex-1 gap-2',
+                              editor.type !== 'plc-global-variable-list' && 'hidden',
+                            )}
+                          >
+                            {editors
+                              .filter((m) => m.type === 'plc-global-variable-list')
+                              .map((model) => {
+                                const isActive =
+                                  editor.type === 'plc-global-variable-list' && editor.meta.name === model.meta.name
+                                return (
+                                  <div key={model.meta.name} className={cn('h-full w-full', !isActive && 'hidden')}>
+                                    <GlobalVariableListEditor listName={model.meta.name} />
+                                  </div>
+                                )
+                              })}
+                          </div>
+                        )}
+
+                        {/* Multi-instance, one shared ResizablePanelGroup so the splitter position is consistent; CSS toggles
+                            visibility, avoiding the dispose-during-tab-switch error chain and preserving editor viewport state. */}
+                        {editors.some((m) => m.type === 'plc-textual' || m.type === 'plc-graphical') && (
+                          <div
+                            className={cn(
+                              'flex h-full w-full flex-1',
+                              editor.type !== 'plc-textual' && editor.type !== 'plc-graphical' && 'hidden',
+                            )}
+                          >
+                            <ResizablePanelGroup
+                              id='editorContentPanelGroup'
+                              direction='vertical'
+                              className='flex flex-1 flex-col gap-1'
+                            >
+                              <ResizablePanel
+                                ref={panelRef}
+                                id='variableTablePanel'
+                                order={1}
+                                collapsible
+                                onCollapse={() => {
+                                  setIsVariablesPanelCollapsed(true)
+                                }}
+                                onExpand={() => setIsVariablesPanelCollapsed(false)}
+                                collapsedSize={0}
+                                defaultSize={25}
+                                minSize={20}
+                                className={`relative flex h-full w-full flex-1 flex-col gap-4 overflow-auto`}
+                              >
+                                {editors
+                                  .filter((m) => m.type === 'plc-textual' || m.type === 'plc-graphical')
+                                  .map((model) => {
+                                    const isActive = editor.meta.name === model.meta.name
+                                    return (
+                                      <div key={model.meta.name} className={cn('h-full w-full', !isActive && 'hidden')}>
+                                        <VariablesEditor name={model.meta.name} isActive={isActive} />
+                                      </div>
+                                    )
+                                  })}
+                              </ResizablePanel>
+
+                              <ResizableHandle
+                                style={{ height: '1px' }}
+                                className={`${isVariablesPanelCollapsed && ' !hidden '}  flex  w-full bg-brand-light `}
+                              />
+
+                              <ResizablePanel
+                                defaultSize={75}
+                                id='textualEditorPanel'
+                                order={2}
+                                className='mt-4 flex-1 flex-grow rounded-md'
+                              >
+                                {editors
+                                  .filter((m) => m.type === 'plc-textual' || m.type === 'plc-graphical')
+                                  .map((model) => {
+                                    const isActive = editor.meta.name === model.meta.name
+                                    return (
+                                      <div key={model.meta.name} className={cn('h-full w-full', !isActive && 'hidden')}>
+                                        {model.type === 'plc-textual' ? (
+                                          <MonacoEditor
+                                            name={model.meta.name}
+                                            language={model.meta.language}
+                                            path={model.meta.path}
+                                            isActive={isActive}
+                                          />
+                                        ) : (
+                                          <GraphicalEditor
+                                            name={model.meta.name}
+                                            language={model.meta.language}
+                                            isActive={isActive}
+                                          />
+                                        )}
+                                      </div>
+                                    )
+                                  })}
+                              </ResizablePanel>
+                            </ResizablePanelGroup>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <p className='mx-auto my-auto flex cursor-default select-none flex-col items-center gap-2 font-display text-xl font-medium'>
+                        No tabs open
+                      </p>
+                    )}
+                    <ResizableHandle
+                      id='consoleResizeHandle'
+                      hitAreaMargins={{ coarse: 12, fine: 3 }}
+                      style={{ height: '2px', width: 'calc(100% - 16px)' }}
+                      className={`absolute bottom-0 left-0 mx-2 transition-colors duration-200 data-[resize-handle-active="pointer"]:bg-brand-light data-[resize-handle-state="hover"]:bg-brand-light data-[resize-handle-active="pointer"]:dark:bg-neutral-700 data-[resize-handle-state="hover"]:dark:bg-neutral-700`}
+                    />
+                  </ResizablePanel>
+
+                  <ResizablePanel
+                    ref={consolePanelRef}
+                    id='consolePanel'
+                    order={2}
+                    collapsible
+                    defaultSize={0}
+                    minSize={22}
+                    onCollapse={() => setIsBottomPanelOpen(false)}
+                    onExpand={() => setIsBottomPanelOpen(true)}
+                    className='min-h-0 flex-1 grow rounded-lg border-2 border-neutral-200 bg-white px-4 pb-4 pt-2 data-[panel-size="0.0"]:hidden dark:border-neutral-800 dark:bg-neutral-950'
+                  >
+                    <Tabs.Root
+                      value={activeTab}
+                      onValueChange={(value) => isBottomPanelTabId(value) && setActiveTab(value)}
+                      className='relative flex h-full min-h-0 w-full flex-col gap-2 overflow-hidden'
+                    >
+                      <div className='flex h-8 flex-none items-center gap-2'>
+                        <Tabs.List className='flex h-7 items-center gap-4'>
+                          {bottomPanelTabs.map((tab) => (
+                            <BottomPanelTabTrigger key={tab.id} tab={tab} />
+                          ))}
+                        </Tabs.List>
+                        <div className='ml-auto flex items-center gap-2'>
+                          {activeTab === 'console' && (
+                            <>
+                              <ConsoleFilters />
+                              <ClearConsoleButton />
+                            </>
+                          )}
+                          {activeTab === 'plc-logs' && (
+                            <>
+                              <PlcLogsFilters />
+                              <ClearConsoleButton
+                                onClear={clearPlcLogs}
+                                isEmpty={typeof plcLogs === 'string' ? plcLogs.length === 0 : plcLogs.length === 0}
+                                label='Clear logs'
+                              />
+                            </>
+                          )}
+                          <BottomPanelHideButton onHide={hideBottomPanel} />
+                        </div>
+                      </div>
+                      <Tabs.Content
+                        aria-label='Console panel content'
+                        value='console'
+                        className='flex h-full min-h-0 w-full flex-col overflow-hidden p-2 data-[state=inactive]:hidden'
+                      >
+                        <ConsoleComponent />
+                      </Tabs.Content>
+                      {isDebuggerVisible && (
+                        <Tabs.Content
+                          value='debug'
+                          className='debug-panel flex h-full w-full overflow-hidden data-[state=inactive]:hidden'
+                        >
+                          <ResizablePanelGroup direction='horizontal' className='flex h-full w-full'>
+                            <ResizablePanel minSize={15} defaultSize={20} className='h-full w-full'>
+                              <VariablesPanel
+                                variables={debugVariables}
+                                variableTree={filteredDebugVariableTree}
+                                graphList={graphList}
+                                setGraphList={setGraphList}
+                                debugBoolValues={debugBoolValues}
+                                debugNonBoolValues={debugNonBoolValues}
+                                debugVariableIndexes={debugVariableIndexes}
+                                debugForcedVariables={debugForcedVariables}
+                                debugExpandedNodes={debugExpandedNodes}
+                                onToggleExpandedNode={toggleDebugExpandedNode}
+                                isDebuggerVisible={isDebuggerVisible}
+                                onForceVariable={handleForceVariable}
+                              />
+                            </ResizablePanel>
+                            <ResizableHandle className='w-2 bg-transparent' />
+                            <ResizablePanel minSize={20} defaultSize={80} className='h-full w-full'>
+                              <Debugger graphList={graphList} />
+                            </ResizablePanel>
+                          </ResizablePanelGroup>
+                        </Tabs.Content>
+                      )}
+                      {hasSearchResults && (
+                        <Tabs.Content
+                          value='search'
+                          className='debug-panel flex  h-full w-full overflow-hidden  data-[state=inactive]:hidden'
+                        >
+                          <ResizablePanelGroup direction='horizontal' className='flex h-full w-full'>
+                            <ResizablePanel minSize={20} defaultSize={100} className='h-full w-full'>
+                              <Search items={searchResults} />
+                            </ResizablePanel>
+                          </ResizablePanelGroup>
+                        </Tabs.Content>
+                      )}
+                      {isPlcLogsVisible && (
+                        <Tabs.Content
+                          aria-label='PLC Logs panel content'
+                          value='plc-logs'
+                          className='flex h-full min-h-0 w-full flex-col overflow-hidden p-2 data-[state=inactive]:hidden'
+                        >
+                          <PlcLogs />
+                        </Tabs.Content>
+                      )}
+                    </Tabs.Root>
+                  </ResizablePanel>
+                </ResizablePanelGroup>
+                {!isBottomPanelOpen && (
+                  <BottomPanelStrip
+                    tabs={bottomPanelTabs}
+                    onOpenTab={openBottomPanel}
+                    onReopen={() => openBottomPanel()}
+                  />
+                )}
+              </div>
+            </ResizablePanel>
+            {ChatPanel && capabilities.hasAIAssistant && isChatOpen && isAIEnabled && hasAIConsented && (
+              <>
+                <ResizableHandle
+                  id='chatHandle'
+                  hitAreaMargins={{ coarse: 12, fine: 3 }}
+                  className='z-[99] my-[2px] w-[4px] py-2 transition-colors duration-200 data-[resize-handle-active="pointer"]:bg-brand-light data-[resize-handle-state="hover"]:bg-brand-light data-[resize-handle-active="pointer"]:dark:bg-neutral-700 data-[resize-handle-state="hover"]:dark:bg-neutral-700'
+                />
+                <ResizablePanel
+                  id='chatPanel'
+                  order={3}
+                  defaultSize={30}
+                  minSize={20}
+                  maxSize={50}
+                  className='relative flex h-full min-h-0 w-full'
+                >
+                  <ChatPanel />
+                </ResizablePanel>
+              </>
+            )}
+          </ResizablePanelGroup>
+        </WorkspaceMainContent>
+      </div>
+      {hasVersionControl && projectPath && (
+        <BranchStatusBar projectId={projectPath} onBranchSwitch={handleBranchSwitch} />
+      )}
+
+      {/* Set only on desktop (no router); web navigates to /history in a new tab instead, leaving this null there.
+          `inset-0` over the workspace rather than a modal: it's a screen, and the graphical diff needs the room. */}
+      {hasVersionControl && projectPath && historyView && (
+        <div className='absolute inset-0 z-50'>
+          <CommitHistoryView
+            projectId={projectPath}
+            commitHash={historyView.commitHash}
+            initialFile={historyView.file}
+            onBack={closeHistoryView}
+            onRestored={() => {
+              closeHistoryView()
+              void reloadOpenProject('The project was restored but could not be reloaded.')
+            }}
+          />
+        </div>
+      )}
+
+      {/* Same arrangement as the commit view above (desktop-only; web navigates to /merge). Closing on a completed
+          merge reloads the project, since the merge moved the branch on the server. */}
+      {hasVersionControl && projectPath && mergeView && (
+        <div className='absolute inset-0 z-50'>
+          <BranchMergeView
+            projectId={projectPath}
+            sourceBranch={mergeView.sourceBranch}
+            targetParam={mergeView.targetBranch}
+            onBack={closeMergeView}
+            onMerged={() => {
+              closeMergeView()
+              void reloadOpenProject('The merge completed but the project could not be reloaded.')
+            }}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+export { WorkspaceScreen }

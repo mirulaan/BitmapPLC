@@ -1,0 +1,263 @@
+import { describe, expect, it } from '@jest/globals'
+
+import type { WasmToolchainTree } from '@root/middleware/shared/ports/wasm-toolchain-mechanisms'
+
+import * as host from '../clang-worker-host'
+import {
+  type ClangWorkerPort,
+  isClangWorkerJob,
+  isYowaspClang,
+  parseClangWorkerInit,
+  runClangJob,
+  serveClangWorker,
+  type YowaspClang,
+} from '../clang-worker-host'
+import type { ClangWorkerReply } from '../clang-worker-pool'
+
+class Exit extends Error {
+  constructor(readonly code: number) {
+    super(`exit ${code}`)
+  }
+}
+
+type Behaviour = (
+  args: string[],
+  options: { stderr: (b: Uint8Array | null) => void; stdout: (b: Uint8Array | null) => void },
+) => WasmToolchainTree | Error
+
+/** A stand-in for the `@yowasp/clang` module. */
+function fakeClang(
+  behaviour: Behaviour = () => ({ 'out.o': new Uint8Array([1]) }),
+): YowaspClang & { calls: string[][]; runOptions: object[] } {
+  const calls: string[][] = []
+  const runOptions: object[] = []
+  return {
+    calls,
+    runOptions,
+    Exit,
+    runClang: (args, _files, options) => {
+      calls.push(args)
+      runOptions.push(options)
+      const outcome = behaviour(args, options)
+      return outcome instanceof Error ? Promise.reject(outcome) : Promise.resolve(outcome)
+    },
+  }
+}
+
+const encode = (text: string): Uint8Array => new TextEncoder().encode(text)
+
+/** An in-memory port: `replies` collects what the worker posts, `deliver` hands it a message. */
+function memoryPort(): ClangWorkerPort & { replies: ClangWorkerReply[]; deliver: (message: unknown) => void } {
+  const listeners: Array<(message: unknown) => void> = []
+  const replies: ClangWorkerReply[] = []
+  return {
+    replies,
+    post: (message) => replies.push(message),
+    onMessage: (listener) => listeners.push(listener),
+    deliver: (message) => listeners.forEach((l) => l(message)),
+  }
+}
+
+const settle = () => new Promise((r) => setTimeout(r, 0))
+
+describe('runClangJob', () => {
+  it('returns the output tree, and stderr and stdout each in their own field', async () => {
+    const clang = fakeClang((_args, options) => {
+      options.stderr(encode('warn'))
+      options.stderr(null)
+      options.stdout(encode('clang version 22\n'))
+      options.stderr(encode('ing\n'))
+      return { 'a.o': new Uint8Array([7]) }
+    })
+    const result = await runClangJob(clang, ['clang', '-c', 'a.c'], { 'a.c': 'x' })
+    expect(result).toEqual({
+      exitCode: 0,
+      stderr: 'warning\n',
+      stdout: 'clang version 22\n',
+      tree: { 'a.o': new Uint8Array([7]) },
+    })
+    expect(clang.calls).toEqual([['clang', '-c', 'a.c']])
+  })
+
+  it('turns a non-zero exit into a result', async () => {
+    const clang = fakeClang((_args, options) => {
+      options.stderr(encode('a.c:1:1: error: x\n'))
+      return new Exit(1)
+    })
+    expect(await runClangJob(clang, ['clang', '-c', 'a.c'], {})).toEqual({
+      exitCode: 1,
+      stderr: 'a.c:1:1: error: x\n',
+      stdout: '',
+      tree: {},
+    })
+  })
+
+  it('runs clang with no fetchProgress option, so the loader neither wraps nor logs its downloads', async () => {
+    const clang = fakeClang()
+
+    await runClangJob(clang, ['clang', '-c', 'a.c'], { 'a.c': 'int a;' })
+
+    expect(clang.runOptions).toHaveLength(1)
+    expect(Object.keys(clang.runOptions[0])).not.toContain('fetchProgress')
+  })
+
+  it('rejects when clang fails in any other way', async () => {
+    const clang = fakeClang(() => new Error('out of memory'))
+    await expect(runClangJob(clang, ['clang'], {})).rejects.toThrow('out of memory')
+  })
+})
+
+describe('serveClangWorker', () => {
+  it('checks clang with --version, reports ready, then answers each job', async () => {
+    const clang = fakeClang()
+    const port = memoryPort()
+    await serveClangWorker(() => Promise.resolve(clang), port)
+    expect(clang.calls[0]).toEqual(['clang', '--version'])
+    expect(port.replies).toEqual([{ type: 'ready' }])
+
+    port.deliver({ id: 4, argv: ['clang', '-c', 'a.c'], tree: { 'a.c': 'int a;' } })
+    port.deliver({ type: 'init' })
+    port.deliver({ id: 5, argv: [1], tree: {} })
+    await settle()
+    expect(port.replies).toEqual([
+      { type: 'ready' },
+      {
+        type: 'result',
+        id: 4,
+        result: { exitCode: 0, stderr: '', stdout: '', tree: { 'out.o': new Uint8Array([1]) } },
+      },
+    ])
+  })
+
+  it('answers a job clang could not run with an error reply', async () => {
+    const clang = fakeClang((args) => (args.includes('--version') ? {} : new Error('trap')))
+    const port = memoryPort()
+    await serveClangWorker(() => Promise.resolve(clang), port)
+    port.deliver({ id: 1, argv: ['clang', '-c', 'a.c'], tree: {} })
+    await settle()
+    expect(port.replies[1]).toEqual({ type: 'error', id: 1, message: 'trap' })
+  })
+
+  it('checks clang with --version without a fetchProgress option', async () => {
+    const clang = fakeClang()
+
+    await serveClangWorker(() => Promise.resolve(clang), memoryPort())
+
+    expect(clang.calls[0]).toEqual(['clang', '--version'])
+    expect(Object.keys(clang.runOptions[0] ?? {})).not.toContain('fetchProgress')
+  })
+
+  it('rejects a module that is not the toolchain', async () => {
+    await expect(serveClangWorker(() => Promise.resolve({}), memoryPort())).rejects.toThrow(
+      'The compiler bundle does not export runClang and Exit.',
+    )
+  })
+
+  it('rejects when clang --version fails, without reporting ready', async () => {
+    const port = memoryPort()
+    await expect(serveClangWorker(() => Promise.resolve(fakeClang(() => new Exit(2))), port)).rejects.toThrow(
+      'clang --version exited with code 2',
+    )
+    expect(port.replies).toEqual([])
+  })
+})
+
+describe('clang-worker-host exports', () => {
+  it('no longer downloads or decodes toolchain resources itself', () => {
+    expect(Object.keys(host)).not.toContain('loadToolchainResources')
+    expect(Object.keys(host)).not.toContain('decodeToolchainResource')
+  })
+
+  it('keeps the stall-limited download', () => {
+    expect(typeof host.downloadWithStallLimit).toBe('function')
+  })
+})
+
+describe('message checks', () => {
+  it('recognises the toolchain module', () => {
+    expect(isYowaspClang(fakeClang())).toBe(true)
+    expect(isYowaspClang({ runClang: () => undefined })).toBe(false)
+    expect(isYowaspClang(null)).toBe(false)
+  })
+
+  it.each([
+    [{ id: 1, argv: ['clang'], tree: {} }, true],
+    [{ id: '1', argv: [], tree: {} }, false],
+    [{ id: 1, argv: 'clang', tree: {} }, false],
+    [{ id: 1, argv: [], tree: new Uint8Array(1) }, false],
+    [{ id: 1, argv: [] }, false],
+    [null, false],
+  ])('job %j -> %s', (value, expected) => {
+    expect(isClangWorkerJob(value)).toBe(expected)
+  })
+})
+
+describe('parseClangWorkerInit', () => {
+  const baseUrl = 'https://editor.test/assets/wasm-toolchain-0123456789ab/'
+  const cache = {
+    name: 'openplc-runtime-files/wasm-toolchain-0123456789ab',
+    urls: [`${baseUrl}llvm.core.wasm`, `${baseUrl}llvm-resources.tar`],
+  }
+
+  it('reads the toolchain folder and the cache reference', () => {
+    expect(parseClangWorkerInit({ type: 'init', baseUrl, cache })).toEqual({ type: 'init', baseUrl, cache })
+  })
+
+  it.each([
+    ['missing', {}],
+    ['null', { cache: null }],
+    ['named outside the runtime file caches', { cache: { ...cache, name: 'workbox-precache-v1' } }],
+    ['with urls that are not a list', { cache: { ...cache, urls: 'llvm.core.wasm' } }],
+    ['with a url that is not a string', { cache: { ...cache, urls: [1] } }],
+    ['not an object', { cache: 'openplc-runtime-files/wasm-toolchain-0123456789ab' }],
+  ])('reads a cache reference that is %s as no cache', (_label, extra) => {
+    expect(parseClangWorkerInit({ type: 'init', baseUrl, ...extra })).toEqual({ type: 'init', baseUrl, cache: null })
+  })
+
+  it.each([
+    ['no baseUrl', { type: 'init', cache }],
+    ['a baseUrl that is not a string', { type: 'init', baseUrl: 1, cache }],
+    ['another type', { type: 'job', baseUrl, cache }],
+    ['no object', null],
+    ['a string', 'init'],
+  ])('reads a message with %s as no init', (_label, value) => {
+    expect(parseClangWorkerInit(value)).toBeNull()
+  })
+})
+
+describe('producedFiles', () => {
+  it('keeps only what a job wrote, folder by folder', () => {
+    const big = new Uint8Array([1, 2, 3])
+    const input: WasmToolchainTree = { 'a.c': 'int a;', 'big.pch': big, dir: { 'b.h': 'x' } }
+    const output: WasmToolchainTree = {
+      'a.c': 'int a;',
+      'big.pch': big,
+      dir: { 'b.h': 'x', 'b.o': new Uint8Array([9]) },
+      out: { 'module.wasm': new Uint8Array([0]) },
+    }
+    expect(host.producedFiles(input, output)).toEqual({
+      dir: { 'b.o': new Uint8Array([9]) },
+      out: { 'module.wasm': new Uint8Array([0]) },
+    })
+  })
+
+  it('keeps an input the job rewrote, and drops a copy with the same bytes', () => {
+    const input: WasmToolchainTree = { 'a.o': new Uint8Array([1]), 'b.o': new Uint8Array([2]), 'c.txt': 'old' }
+    const output: WasmToolchainTree = { 'a.o': new Uint8Array([1]), 'b.o': new Uint8Array([3]), 'c.txt': 'new' }
+    expect(host.producedFiles(input, output)).toEqual({ 'b.o': new Uint8Array([3]), 'c.txt': 'new' })
+  })
+
+  it('replies to a job without the files it was given', async () => {
+    const pch = new Uint8Array(64)
+    const clang = fakeClang(() => ({ 'a.c': 'int a;', 'pch.pch': pch, 'out.o': new Uint8Array([1]) }))
+    const port = memoryPort()
+    await serveClangWorker(() => Promise.resolve(clang), port)
+    port.deliver({ id: 1, argv: ['clang', '-c', 'a.c'], tree: { 'a.c': 'int a;', 'pch.pch': pch } })
+    await settle()
+    expect(port.replies[1]).toEqual({
+      type: 'result',
+      id: 1,
+      result: { exitCode: 0, stderr: '', stdout: '', tree: { 'out.o': new Uint8Array([1]) } },
+    })
+  })
+})

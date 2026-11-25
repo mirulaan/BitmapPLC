@@ -1,0 +1,53 @@
+import * as PrimitivePopover from '@radix-ui/react-popover'
+
+import { useIsEditingLocked } from '../../../hooks/use-editing-lock'
+import { cn } from '../../../utils/cn'
+
+export const GenericAreaTextCell = ({
+  value,
+  onChange,
+  onBlur,
+  selected = false,
+}: {
+  value: string
+  onChange: (value: string) => void
+  onBlur: () => void
+  selected?: boolean
+}) => {
+  const isEditingLocked = useIsEditingLocked()
+
+  return (
+    <PrimitivePopover.Root>
+      <PrimitivePopover.Trigger asChild>
+        <div
+          className={cn(
+            'flex h-full w-full cursor-text items-center justify-center p-2',
+            { 'pointer-events-none': !selected || isEditingLocked },
+            isEditingLocked && 'cursor-not-allowed',
+          )}
+        >
+          <p className='h-4 w-full max-w-[400px] overflow-hidden text-ellipsis break-all'>{value}</p>
+        </div>
+      </PrimitivePopover.Trigger>
+      <PrimitivePopover.Portal>
+        <PrimitivePopover.Content
+          align='center'
+          side='bottom'
+          sideOffset={-32}
+          className='box h-fit w-[175px] rounded-lg bg-white p-2 dark:bg-neutral-950 lg:w-[275px] 2xl:w-[375px]'
+          onInteractOutside={onBlur}
+        >
+          <textarea
+            aria-label='Edit value'
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            onBlur={onBlur}
+            readOnly={isEditingLocked}
+            rows={5}
+            className='w-full max-w-[375px] flex-1 resize-none bg-transparent text-start text-neutral-900 outline-none dark:text-neutral-100'
+          />
+        </PrimitivePopover.Content>
+      </PrimitivePopover.Portal>
+    </PrimitivePopover.Root>
+  )
+}

@@ -1,0 +1,931 @@
+# OpenPLC Editor
+
+OpenPLC Editor is an Electron + React desktop IDE for programming PLCs in the IEC 61131-3 languages (Structured Text, Ladder Diagram, Function Block Diagram, Instruction List) plus Python and C++ extensions.
+
+## Autonomy development rules
+
+These rules are identical in every Autonomy repository and are maintained in the MisterFlow plugin
+(`Autonomy-Logic/skills`, `plugins/autonomy/harness/repository-rules.md`). Change them there, not here.
+
+- Tracked work starts with `autonomy:misterflow`: load it yourself before changing product code, fixing a
+  bug, implementing or preparing a PR, even when no Jira key was mentioned. Only answering questions and typo or wording fixes that
+  change no behaviour are exempt. "There is no ticket" or "skip the process" does not make product
+  work untracked: offer to create the task instead of changing code. This file describes only this
+  repository's commands, architecture and code conventions; for process, MisterFlow and the Confluence
+  process pages win over anything written here.
+- Knowledge boundary: when data is missing or uncertain, say there is not enough information to answer
+  reliably. Never fill a gap with a plausible assumption. Keep verified facts, inferences and missing
+  data visibly separate, and say which is which.
+- Language: answer in the developer's language. Jira, Confluence and GitHub text is always English.
+- Branches: `feature/<KEY>-<slug>` for demands and `bugfix/<KEY>-<slug>` for bugs, created from the
+  integration branch named below. A production hotfix is a `bugfix/<KEY>-<slug>` branch from `main` and
+  a PR. Never commit or push directly to the integration branch or `main`. One Jira key per branch: work
+  for another key starts on its own branch before any edit. The key goes in the branch name and the PR
+  title, never in commit messages, code or comments.
+- Commits: never commit on your own initiative. Propose the commit at a natural checkpoint, such as a
+  finished and verified plan phase, and make it only after the developer confirms. Commit and push are
+  separate commands, each confirmed on its own, never chained; opening a PR and merging each need their
+  own confirmation too. When asked for a commit message or a commit, do not edit files you were not
+  asked to change: report problems, such as a forbidden comment, and let the developer decide.
+- Scope: a rewrite or refactor beyond the current task is a new demand, proposed as a separate task and
+  never mixed into the current branch. Never stash, reset, `checkout -- .` or otherwise discard the
+  developer's changes, and never install anything outside the repository, without asking.
+- Tests: every demand ships with unit tests, an end-to-end test and a manual test by the developer, with
+  evidence for each before any PR is opened, a draft PR included. Where this repository has no
+  interface of its own, the end-to-end test runs through the interface or protocol that uses it. A
+  repository with no code to unit test, such as documentation or local tooling scripts, uses its own
+  validation checks in place of unit tests.
+- Typing: `any` in TypeScript and `typing.Any` in Python are forbidden. Use concrete types, or `unknown`
+  or `object` narrowed where the data enters.
+- Comments: technical and minimal, at most 256 characters each; formal API documentation (JSDoc,
+  docstrings, Doxygen) may be longer. Never write business rules, product strategy or rationale, Jira
+  keys, names of people or customers, internal links or anything sensitive in a comment. Review the
+  comments in the changed files before every commit.
+
+Integration branch: `development`. Jira project: `DOPE`.
+
+External contributors without Jira access follow CONTRIBUTING.md; GitHub Issues (`.github/ISSUE_TEMPLATE/`) is how they report bugs.
+
+## Build & Development Commands
+
+**Package manager:** `npm` (not pnpm)
+
+```bash
+npm install              # Install deps + download binaries + Python runtime + build DLL cache
+npm run setup:python     # Fetch the pinned Python runtime into vendor/python-runtime/ (python-runtime.json)
+npm run setup:hmi-widgets # Fetch the pinned HMI widget libraries into vendor/hmi-widgets/ (binary-versions.json)
+npm run dev              # Full dev mode (main + renderer + Electron, port 1313)
+npm run build            # Production build (main + renderer)
+npm run build:main       # Electron main process only
+npm run build:renderer   # React renderer only
+npm run build:dll        # Webpack DLL cache for faster dev rebuilds
+npm run build:relay      # Vendor-document relay.js for a VPP package (release/relay/)
+npm run package          # Build + create distributable (electron-builder)
+npm run package:test     # Test-only package with the inspect fuse on, for Playwright (never in a workflow)
+
+npm run lint             # ESLint check
+npm run lint:fix         # Auto-fix lint issues
+npm run format           # Prettier formatting
+
+npm run test             # Jest with coverage (enforced thresholds)
+npm run test:watch       # Jest watch mode (no coverage)
+npm run test:e2e         # Playwright E2E tests
+npm run test:hmi-core    # HMI C core: golden scenes (gcc, clang, WebAssembly), unit tests, sanitized fuzzing
+npm run test:hmi-unit    # HMI unit generator: a sample project's unit run by a C host (gcc, clang, sanitizers)
+npm run test:hmi-baremetal # HMI baremetal host in simulated time and the readout's Modbus side (gcc, clang, sanitizers)
+npm run test:hmi-client  # Runtime v4 HMI artefact: hmi.wasm driven as the browser does, same pixels as a native build
+
+npm run validate:arch    # Architecture layer dependency validation
+```
+
+## Verify before pushing (CI parity)
+
+CI runs these commands directly, not `npm run lint` or `npm run format`. The `lint`
+script passes its glob unquoted, so the shell expands it and only part of `src/` is
+linted; `format` rewrites files and so passes locally while CI's `--check` still fails. Tests run under
+**Jest** (not Vitest), and both `tsc` and `jest` import the `strucpp` package,
+so it must be installed first or they fail with `TS2307: Cannot find module
+'strucpp'`. Run each exact command (from `.github/workflows/`) green before you push:
+
+```bash
+npm ci --ignore-scripts && npm run setup:strucpp   # required first, or tsc/jest can't resolve 'strucpp'
+npm run setup:python                               # the pinned Python runtime (vendor/python-runtime/), skipped by --ignore-scripts
+npm run setup:hmi-widgets                          # the pinned HMI widget libraries (vendor/hmi-widgets/), which the HMI suites build with
+npx tsc --noEmit                                   # ci-build:       Build Check
+npx prettier --check "./src/**/*.{ts,tsx}"         # ci-format:      Format Check
+npx eslint "./src/**/*.{ts,tsx}"                   # ci-lint:        Lint Check
+npx jest --config jest.config.json --collectCoverage --ci   # ci-unit-tests
+```
+
+`prettier --check` only reports; fix with `npx prettier --write <files>`.
+
+`npm run setup:strucpp` installs the **pinned** STruC++ from its GitHub release
+and overwrites whatever is in `node_modules/strucpp`, so a locally patched build
+(testing an unreleased parser change) is wiped by the very command CI runs. Jest
+loads the parser through `dist/parser-bundle.cjs` — STruC++'s ESM chain does not
+survive Jest's CJS transform — so the pinned release has to be one that ships
+that bundle, or every suite fails to load. Run the suite again after
+`setup:strucpp` rather than trusting a run made against a patched install.
+The shared surface (`src/frontend`, `src/middleware/shared`, `src/backend/shared`)
+is byte-identical with **openplc-web** — mirror any change and run the check suite
+in BOTH repos (web uses **Vitest**, not Jest, so a test can pass here and fail there).
+
+## Thin adapters (hard rule)
+
+**All logic lives in the shared surface. Adapters are thin: they hold only the
+platform mechanism.** Desktop and web must run the same logic, line by line, so
+a feature cannot work on one and break on the other.
+
+Platform code is everything outside the shared surface: `src/middleware/adapters/*`,
+and on the desktop also `src/main/` and `src/backend/editor/`, on the web also
+`src/backend/web/`. It may only:
+
+- **Store and bring back data**: read or write a file, list a folder, call an HTTP
+  endpoint, send over IPC or WebRTC, exactly as given.
+- **Run code elsewhere**: start a thread, Web Worker or process, and pass messages to it.
+- **Reach the OS**: native dialogs, keyring, serial ports, menus, system browser.
+- **Handle transport**: retry a transient network failure, turn an HTTP or IPC
+  failure into an `Error` with a message.
+
+Everything else is logic and goes to the shared surface, including: parsing,
+validation, hashing, dedup, ids, defaults, file and index formats (current and
+legacy), caching, ordering of writes, state machines, interpreting response
+bodies, and building or reshaping domain objects. Pass data across a platform
+boundary **verbatim**: never rebuild an object field by field
+(`{ id: x.id, name: x.name, ... }`) in platform code, or the next field added in
+shared code is silently dropped on that platform.
+
+**Pattern.** The port implementation is a shared factory, `createXxxPort(mechanisms)`,
+and the mechanism interfaces live in `src/middleware/shared/ports/`. Each
+platform's adapter only builds the mechanisms and calls the factory. Reference:
+the ESI repository. Shared: `backend/shared/ethercat/esi-repository-port.ts`
+(hashing, dedup, ids, summaries, caches), `esi-file-store.ts` (index format,
+legacy versions, validation, write order), `esi-parse-ops.ts`, and
+`ports/esi-repository-mechanisms.ts`. Mechanisms: desktop
+`adapters/editor/esi-adapter.ts` + `backend/editor/ethercat/esi-project-files.ts`
+(file read, write, list, remove); web `adapters/web/esi-adapter.ts` (Edge HTTP)
++ `services/esi/esi.worker.ts`. Test the behaviour once, in a shared test, with
+the real shared code and an in-memory mechanism.
+
+**Why.** When each platform kept its own copy of the ESI repository logic, the
+desktop copy dropped `modules` and modular EtherCAT couplers lost their modules
+on the desktop only.
+
+**Enforcement.** `.claude/hooks/thin-adapter-guard.mjs` (a Claude Code `PreToolUse` hook in
+`.claude/settings.json`) blocks an agent's first write to each platform file in a session and shows
+this rule; the same write then passes, so the agent must name the mechanism or move the logic. It
+loads only when Claude Code runs from this repository, and does not see shell edits.
+
+**Existing code** that predates this rule still has logic in adapters. Don't add
+more: when a change touches such a port, move its logic into the shared surface
+in the same PR pair (editor + web).
+
+**Exception: package trust (DOPE-893).** The trust anchor in `src/backend/editor/package-trust/`
+is desktop-only logic: a module generated per build (`scripts/package-trust/`) that checks every
+package decision of `PackageManagerModule` (`src/backend/editor/package-manager/`). Neither it nor
+the `PackageManagerModule` logic is moved to the shared surface, and openplc-web is not changed.
+This is a recorded exception, not a precedent: see `docs/release-hardening.md`.
+
+## Electron e2e (Playwright)
+
+`ci-e2e-debug-lock.yml` runs the `debug-*` specs on every pull request; every other
+spec is a local check. `e2e/` drives the real Electron app through `_electron.launch`,
+and three things bite before any assertion:
+
+```bash
+npm run setup:python                                   # the Python runtime the simulator runs, if not installed
+OPENPLC_E2E_DEBUG_SEAM=1 npm run build                 # main + renderer
+mkdir -p release/app/configs/dll
+cp release/app/dist/main/preload.js release/app/configs/dll/preload.js
+npx playwright test e2e/<spec>.ts --workers=1
+```
+
+`OPENPLC_E2E_DEBUG_SEAM=1` installs `window.__OPENPLC_E2E_DEBUG_SESSION__`, which opens
+and closes a debug session with no PLC attached. Any other build drops the branch, and
+`electron-builder`'s `beforePack` hook refuses to package a renderer that carries it.
+
+- **The preload copy is required.** `main.ts` picks the preload with `app.isPackaged`,
+  and a suite launching `release/app/dist/main/main.js` directly is NOT packaged, so it
+  looks under `release/app/configs/dll/` - a path `npm run build` never writes. Without
+  it the window renders blank and the only clue is `Cannot read properties of undefined
+  (reading 'onSimulatorStopped')` in the renderer console.
+- **Do not set `NODE_ENV=development`.** `resolveHtmlPath` would point the window at the
+  webpack dev server on `localhost:1212`, which is not running against a built app.
+- **`firstWindow()` returns the splash**, which then closes. Poll `app.windows()` for the
+  one whose URL contains `index.html`.
+- **Build profile paths from `realpathSync(tmpdir())`.** On macOS Electron resolves `userData`
+  through the `/var` symlink, and a package path recorded under `/var/...` fails the containment
+  check, so the package's boards silently never load.
+- **`app.close()` hangs with a project open**: the quit confirmation holds it. Kill the process
+  (`app.process().kill('SIGKILL')`) once what the test needs is on disk.
+- **An unsigned fixture package is removed when a project opens.** A suite that installs one
+  (`e2e/fixtures/vendor-configurator/`) replaces the `packages:verify-signatures` handler with a
+  no-op once the bridge has registered it, as `e2e/vendor-configurator.spec.ts` does.
+- **Packaged builds carry Electron fuses** (`electronFuses` in `electron-builder.json`): no
+  `ELECTRON_RUN_AS_NODE`, no `NODE_OPTIONS`, no `--inspect` style arguments, ASAR integrity, and the
+  app loads only from `app.asar`. `_electron.launch` needs the inspect arguments, so Playwright can
+  drive a packaged build (`E2E_PACKAGED_APP`) only when it comes from `npm run package:test`. A
+  release build (`npm run package`) is checked by spawning it (`scripts/release/packaged-checks.mjs`).
+- **`E2E_PACKAGED_APP` switches every spec that launches through `e2e/helpers/editor-session.ts`**
+  (`launchEditor` or its `editor` fixture) to that packaged executable, path resolved from the
+  repository root; unset, they run the built `release/app/dist/main/main.js`.
+- **A modified `app.asar` makes the app terminate at start**, with exit code 1 or a signal such as
+  SIGTRAP: expect either.
+- **A local macOS build with no signing identity starts only because `resetAdHocDarwinSignature`**
+  re-signs it ad hoc after the fuses are written. It has no hardened runtime; only CI's Developer ID
+  builds do. Details: `docs/release-hardening.md`.
+
+**Never wait on a dead app.** Every wait for a build, a Play, a running simulator or a Console line must also
+read what the app shows and fail at once when it reports a failure: use `e2e/helpers/app-console.ts`
+(`waitForApp`, `waitForText`; identical in both repos) instead of polling a success condition alone. Most specs
+finish in under 3 minutes: set `test.setTimeout` near 180 s and each wait in tens of seconds, and run with
+`--global-timeout` (or in the background). Prove it with a negative control: break the fixture and expect a failure
+within seconds that quotes the Console. The Console is readable only while its tab is open; Play opens the debugger
+tab, so click the `Console` tab before reading block output.
+`launch()` (`e2e/helpers/ethercat-project.ts`) throws at once when the splash shows a startup failure.
+
+Every open tab keeps its Monaco editor mounted (hidden with `display: none`), so read
+body text from `.view-lines:visible`, never `.view-lines` alone.
+
+## Architecture
+
+### Layer Overview
+
+```
+src/
+├── main/                  # Electron main process (Node.js)
+├── frontend/              # React UI layer (renderer process)
+│   ├── components/        # Atomic Design: _atoms, _molecules, _organisms, _features, _templates
+│   ├── store/             # Zustand store (slices under store/slices/)
+│   ├── hooks/             # Custom React hooks
+│   ├── services/          # Business logic and side effects
+│   ├── utils/             # Domain utilities (PLC, graphical, debug, formatters)
+│   ├── data/              # Static data (function libraries, block definitions)
+│   ├── locales/           # i18next translations
+│   └── assets/            # Images, icons
+├── backend/
+│   ├── editor/            # Main process modules (compiler, hardware, modbus, ethercat, library-manager, services)
+│   └── shared/            # Platform-agnostic utilities (XML generation, project parsing, simulator)
+├── middleware/             # Ports & Adapters layer
+│   ├── shared/
+│   │   ├── ports/         # Port interfaces (platform-agnostic contracts)
+│   │   └── providers/     # PlatformContext (React Context for dependency injection)
+│   └── adapters/
+│       └── editor/        # Electron-specific port implementations (IPC bridge)
+├── types/                 # Shared IPC type contracts
+└── __architecture__/      # Layer dependency validation script
+```
+
+### Ports & Adapters Pattern
+
+The codebase uses **dependency inversion** via port interfaces. Frontend code never imports backend or Electron APIs directly. All platform-specific behavior flows through ports.
+
+**Main port interfaces** (full list in `src/middleware/shared/ports/`):
+
+| Port | Responsibility |
+|------|---------------|
+| `CompilerPort` | PLC compilation pipeline |
+| `RuntimePort` | Remote PLC runtime control (login, start/stop, status) |
+| `RuntimeProvisioningPort` | Install or start the OpenPLC Runtime on a device over SSH (desktop only; absent on web) |
+| `DebuggerPort` | Debug protocol (read/write variables, MD5 verification) |
+| `SimulatorPort` | Built-in OpenPLC Simulator (WebAssembly) |
+| `ProjectPort` | Project CRUD operations |
+| `DevicePort` | Board discovery, serial ports |
+| `OrchestratorPort` | Device fleet management (web-only) |
+| `SystemPort` | Platform services (store, logging, external links) |
+| `WindowPort` | Native window management |
+| `AcceleratorPort` | Keyboard shortcuts |
+| `ThemePort` | Theme detection and switching |
+| `VersionControlPort` | Git operations |
+| `AIPort` | AI assistant (optional) |
+
+**Consuming ports** in components:
+```typescript
+import { useCompiler, useRuntime, useCapabilities } from '@root/middleware/shared/providers'
+
+function MyComponent() {
+  const compiler = useCompiler()
+  const capabilities = useCapabilities()
+
+  if (capabilities.hasLocalSerialPorts) { /* ... */ }
+  await compiler.compileProgram(args, onProgress)
+}
+```
+
+**Wiring** happens at the composition root (`src/composition-root.ts`), the only
+place the store and the ports are instantiated; `src/App.tsx` provides them:
+```typescript
+export const appStore = createOpenPLCStore()
+export const editorPorts = createEditorPorts(appStore)
+
+<OpenPLCStoreProvider store={appStore}>
+  <PlatformProvider ports={editorPorts}>...</PlatformProvider>
+</OpenPLCStoreProvider>
+```
+The CLI creates its own store per process and passes it down (`src/cli/main.ts`, `src/cli/session/daemon-main.ts`).
+
+**Editor adapters** (`src/middleware/adapters/editor/`) supply the desktop's mechanisms (`window.bridge.*`, Electron IPC) to shared port implementations. The web repo supplies HTTP/WebRTC mechanisms instead. Adapters are thin and logic-free: see **Thin adapters (hard rule)**.
+
+### Architecture Layer Rules
+
+Enforced by `npm run validate:arch`. Source dependencies point inward only:
+
+```
+assets      -> utils, data
+utils       -> utils, ports, data, assets
+data        -> ports, utils, data, assets
+types       -> store, utils
+ports       -> utils, ports
+provider    -> ports, utils
+adapters    -> ports, provider, utils, backend-shared, backend-web, store, assets
+backend-shared -> ports, utils, types
+store       -> ports, provider, store, utils, assets
+services    -> ports, provider, store, services, utils, assets
+hooks       -> ports, provider, store, hooks, services, utils, assets
+components  -> ports, provider, store, hooks, services, components, data, utils, assets
+```
+
+### IPC Communication
+
+Main and renderer processes communicate through typed IPC bridges:
+
+- **Main bridge:** `src/main/modules/ipc/main.ts` — `MainProcessBridge` registers 50+ `ipcMain.handle()` handlers
+- **Renderer bridge:** `src/main/modules/ipc/renderer.ts` — async wrappers calling `ipcRenderer.invoke()`
+- **Preload:** `src/main/modules/preload/preload.ts` — exposes `window.bridge` via `contextBridge`
+
+Vendor package documents (an embedded configurator, for example) are served to a sandboxed iframe under
+the `vpp-doc://` scheme, never with `allow-same-origin`; see `docs/vendor-document-serving.md`.
+
+Installing or starting the OpenPLC Runtime on a device over SSH (`runtime-provisioning:*` channels), its
+host-key file and the test-device steps: see `docs/runtime-ssh-provisioning.md`.
+
+### State Management (Zustand)
+
+Single store composed of the slices in `RootState` (`src/frontend/store/index.ts`), accessed via auto-generated selector hooks:
+
+```typescript
+import { useOpenPLCStore } from '@root/frontend/store'
+
+const pous = useOpenPLCStore((s) => s.project.data.pous)
+const createPou = useOpenPLCStore((s) => s.projectActions.createPou)
+```
+
+**Slice pattern** — each slice has three files:
+
+- `types.ts` — state shape + action signatures
+- `slice.ts` — implementation using Immer's `produce()` for immutable updates
+- `index.ts` — re-exports
+
+**Key slices:**
+
+| Slice | Purpose |
+|-------|---------|
+| `project` | PLC project structure (POUs, data types, servers, devices) |
+| `device` | Board config, pin mappings, runtime connection |
+| `editor` | Editor models (discriminated union: textual, graphical, device, etc.) |
+| `tabs` | Open file tabs |
+| `workspace` | UI viewport state, debug values |
+| `ladder` | Ladder diagram rungs per POU |
+| `fbd` | FBD flow graphs per POU |
+| `console` | Log output |
+| `library` | System + user function block libraries |
+| `file` | File save states (dirty tracking) |
+| `print` | Print/export-to-PDF selection, render mode, page policy, page setup |
+| `ai`, `history`, `modal`, `readme`, `search`, `shared`, `version-control`, `webrtc` | Supporting features |
+
+**Conventions:**
+- Actions are grouped under a `*Actions` namespace (e.g., `projectActions`, `deviceActions`)
+- Complex actions return `{ ok: boolean; message?: string }` response objects
+- State is never mutated directly — always use `produce()` from Immer
+- There is no store singleton. Components and hooks read state with `useOpenPLCStore(selector)` and get the
+  instance with `useOpenPLCStoreApi()` (both from `OpenPLCStoreProvider`'s context); services and adapters
+  take `store: OpenPLCStore` as their first argument and never import an instance
+
+### Component Organization (Atomic Design)
+
+```
+src/frontend/components/
+├── _atoms/          # Primitive UI elements (buttons, inputs, select, checkbox, table)
+├── _molecules/      # Composed patterns (menu-bar, modal, variables-table, tabs)
+├── _organisms/      # Complex sections (explorer, panel, console, debugger, navigation)
+├── _features/       # Context-specific feature bundles
+│   ├── [app]/       # App-level (loading overlay, toast)
+│   ├── [start]/     # Start screen (menu, new-project modal)
+│   └── [workspace]/ # Workspace features
+│       └── editor/  # Monaco, graphical (LD/FBD/SFC), device, server editors
+├── _templates/      # Layout wrappers (app-layout, workspace-layout)
+└── ui/              # Radix UI primitive wrappers
+```
+
+### Navigation
+
+There is **no URL-based router**. Navigation is tab-driven via the Zustand `tabs` + `editor` slices:
+
+1. `App.tsx` renders `StartScreen` (no project) or `WorkspaceScreen` (project loaded)
+2. Opening a POU/resource creates a tab entry in the store
+3. Clicking a tab sets the active `EditorModel` (discriminated union determines which editor renders)
+
+### Graphical Editors
+
+- **Ladder Diagram (LD):** DnD Kit-based, rung structure with contacts/coils/blocks
+- **Function Block Diagram (FBD):** @xyflow/react flow graph with custom node types (block, variable, connector, comment)
+- **SFC:** @xyflow/react graph (sequential function charts)
+
+Flow state is stored per-POU in dedicated slices (`ladder`, `fbd`). Flows must be relinked to current variables after variable table changes.
+
+**LD layout engine** (`src/middleware/shared/utils/ladder-layout/`, byte-identical on openplc-web). Every stored LD
+coordinate is engine output: `layoutRung(rung, labelSource)` computes the geometry (columns sized from names and
+locations, a location line reserved on every contact and coil, block header band and pin rows) and
+`applyRungLayout` stores it, with the natural size as `defaultBounds` and `reactFlowViewport`. Editing paths call
+`relayoutRung(rung, labelSource)`, which also rebuilds the pin variable boxes. Every layout caller passes a
+`LadderLabelSource` (`pouLabelSource(project, pou)`); a caller without one passes `EMPTY_LABEL_SOURCE`. The input pin networks of a main-series
+block start at the left rail, each column sharing one width with the main series before the block. In a parallel
+group every branch spans the longest branch: a shorter branch ends in a straight branch filler to one vertical
+closing junction (before the coils in a trailing coil group). Branch fillers and junction lines are derived from the
+layout (`RungLayout.branchFillers`, `parallelEdgeRoute`) and never stored. Geometry decides the order of the
+compiled statements, so any layout change must keep the ST-order corpus green
+(`st-transpiler/__tests__/ld-relayout-corpus.test.ts`).
+
+**LD screen drawing.** The LD editor lays every rung of the POU out once (`useLadderPouCanvasValue`,
+`_molecules/graphical-editor/ladder/rung/pou-canvas.ts`), and each rung body gives its layout, the label source and
+the theme palette (`LADDER_PALETTE`) to the node atoms through `LadderRungViewProvider`
+(`_atoms/graphical-editor/ladder/rung-view.tsx`). The atoms draw the layout's labels as SVG text in JetBrains Mono,
+never as HTML; a name becomes a one-line `<input>` when clicked or when its element is placed. Every edge
+`parallelEdgeRoute` routes is drawn as the straight polyline of the `ladderRoute` edge type (`route-edge.tsx`); other
+edges stay xyflow `smoothstep`. Rendering itself writes no geometry: the panel size comes from the layout, and xyflow's
+measurements stay local; the LD editor stores the layout on any rung whose stored geometry drifted from it (a
+rename, an instance name, a changed location, a new rung: `withLaidOutGeometry`). The LD diff view lays both sides out the same way with the project's current
+variables, and marks an element whose position or size alone changed only in a rung pair that is a pure re-layout
+(`graphical-diff.ts`).
+
+**LD POU canvas.** A POU is one canvas (`ld-pou-canvas`) that scrolls sideways as one, with a 44 px left gutter.
+`presentPou(layouts, visibleWidth)` (`ladder-layout/presentation.ts`) puts one right rail for every rung 24 px from
+the editor's right edge when every rung fits, else right after the widest rung, and right-justifies each rung's
+trailing outputs against it as display-only x shifts (`dxByNode`). xyflow gets `toDisplayNodes(...)`; every position
+it reports goes through `toCanonicalPosition` before reaching rung state, copycats and placeholders shift with the node
+they stand for (`withTransientShifts`), and hit-tests compare displayed positions with the pointer. The shifts and the
+editor width are never stored.
+
+**LD print.** The PDF draws Ladder from the same engine (`backend/shared/print/ladder-painter.ts`, with the POU's
+`LadderLabelSource` carried in the `ld` `PrintPou`), in `LADDER_PALETTE.paper`: one content block per rung (comment
+lines wrapped, number, rows) so pages break only between rungs, then the End row. `ladder-print-plan.ts` picks the
+scale: 100% when the widest rung fits, else one POU scale down to 80%, then a rung wraps between top-level segments
+onto rows joined by lettered markers (A..Z, AA), its outputs on the last row; a rung with a part too wide for a row,
+or taller than the page, is scaled alone. Gutter, rails, number and comment use the POU scale, so the rails of every
+rung meet. Scale to fit keeps one scale for the widest rung, no floor, no wrap.
+
+### Compilation Pipeline
+
+Orchestrated by `CompilerModule` (`src/backend/editor/compiler/compiler-module.ts`):
+
+```
+PLCProjectData -> Preprocess POUs -> ST transpiler (in-process) -> strucpp -> C++ code
+                                                                           |
+                                                    defines.h (pins, Modbus, MD5)
+                                                                           |
+                                                    Arduino CLI / openplc-compiler -> firmware
+                                                    WebAssembly toolchain -> simulator.wasm (OpenPLC Simulator)
+```
+
+Structured Text is generated in-process by the TS transpiler
+(`src/backend/shared/transpilers/st-transpiler/`) on both editor and web — the
+legacy `xml2st` binary path has been retired. `XmlGenerator` is kept only for
+the "Export Project as XML" feature.
+
+**The Modbus block of `defines.h` has two sources**
+(`src/backend/shared/compile/steps/modbus-defines.ts`): the project's Modbus
+`PLCServer` (transports, slave id, TCP port, speed of its own UART) and the
+board's VPP screens (`serial` and `network` sections: default UART speed, RS-485
+pin, network). `resolveServerBaud`
+(`src/middleware/shared/utils/modbus-server-profile/baud.ts`) owns the choice of
+the default UART's speed, and the screen calls it too. A firmware build serves
+exactly one slave, so `selectModbusServer` refuses a build with more than one
+enabled server. `DEBUG_BAUD` comes from `screens.serial.baud_rate` and
+`DEBUG_SLAVE` is the constant 1.
+
+With one UART for both (no `MBSERIAL_ON_SECONDARY`), the firmware answers two ids on it, routed by
+function code (`handle_serial_port` in `resources/sources/Baremetal/modbus_serial.cpp`): the editor's id
+(`MB_EDITOR_SLAVE`, equal to `DEBUG_SLAVE`) carries only the editor function codes 0x41-0x4E, board ID
+provisioning (0x4E) included (`mb_pdu_is_editor_fc` in `modbus_pdu.cpp`) and silently drops anything else; the server's id
+(`modbus.slaveid`, from `MBSERIAL_SLAVE`) carries the standard frames the framer recognizes and answers
+an editor function code with an illegal-function exception. A function code the framer does not
+recognize is dropped during serial framing, not answered. When the two ids are equal, that id serves
+both, and a build without the debugger (`MB_EDITOR_SLAVE` undefined) uses the server's id for both.
+With `MBSERIAL_ON_SECONDARY`, the default UART answers only `DEBUG_SLAVE` and the secondary UART only
+`MBSERIAL_SLAVE`.
+
+Platform-specific binaries in `/resources/bin/[platform]/[arch]/`. Board configs in `src/backend/shared/firmware/hals.json`.
+
+**Pre-build gates.** `evaluateVppBackplaneGate`
+(`src/middleware/shared/utils/build-gate/vpp-backplane-gate.ts`, shared with openplc-web) refuses when: the
+project's board is not among the selected vPLC's boards; a vendor board is used with no vPLC selected on a
+host whose vPLCs provide the vendor boards; the vPLC reports `backplaneAccess: false`; or the vPLC's package
+is `null` or differs from the board's. In `src/frontend/components/_organisms/workspace-activity-bar/default.tsx`,
+`handleBuild` runs it before `evaluatePreBuildPlcGate`, and `handleMd5Verification` runs it before offering an upload.
+It is inert in the editor (no orchestrator devices) and kept so the shared surface stays byte-identical with openplc-web.
+
+### WebAssembly toolchain
+
+clang, lld and libc++ run inside the editor as WebAssembly (`@yowasp/clang`, pinned to an exact version in
+`package.json`); no native compiler is involved. `CompilerPort.compileToWasm(request)` compiles C and C++
+translation units into one module and returns its bytes and the compiler's diagnostics; a bad request comes back
+as diagnostics too, never as a rejection. The logic is shared and byte-identical with openplc-web, in
+`src/backend/shared/wasm-toolchain/`: compile and link, the clang worker's runner, the worker host, and the check of requests
+that cross a boundary. `compileStrucppToWasm` lays out STruC++ output with its runtime headers.
+
+- **Object cache:** per unit, for the session (256 MB, least recently used first), up to four objects per unit key
+  (compiler, flags, source path), one per content: the gallery, the preview and a widget preview
+  build the same paths from different headers and no longer evict each other. Each object is kept with the SHA-256 of
+  every request file clang says it read (`-MD`) and the names of all its dependencies, toolchain headers included. It
+  is reused while those files are unchanged and no file carrying one of those names was added or removed; other added
+  or removed files leave it valid. A request equal to one already linked (every file, unit, flag and the output)
+  returns the kept module with no compile and no link.
+- **Objects across sessions:** when the toolchain is prepared (editor start, page load), or at the first build if that
+  comes first, the cache is filled from a store (desktop: `userData/User/WasmObjects/`, web: IndexedDB
+  `openplc-wasm-objects`; one record per object, named by its content digest) and every new object or linked module
+  is written through, at most 192 MB, oldest first. Records of another toolchain or damaged ones are removed. The
+  toolchain's identity is the pinned version (`toolchain-identity.ts`), not a `clang --version` run. Builds wait for
+  the store to load; a store that cannot be read only costs the reuse.
+- **Shipped objects:** `npm run build:hmi-objects` (`scripts/build-hmi-objects.ts`, part of `npm run build`) compiles
+  the objects no project changes (HMI core, font tables, hosts, the widget library units and their factory tables, built
+  from the pinned `vendor/hmi-widgets/` archives, and the OpenPLC Simulator units of the bundled PLC libraries;
+  `hmi/lib-object/fixed-objects.ts`, 23 objects, about 2.7 MB) from reference builds into `release/hmi-objects/` (not committed);
+  packaging ships it as the extra resource `hmi-objects` and refuses to run without it (`before-pack-debug-seam.js`).
+  The compile service reads them into the session cache at toolchain start, only from the installation (or the
+  repository's folder in development; `desktop-shipped-objects.ts` refuses links and paths out of it), never from a
+  project and never into the user's store; each is used, like any cached object, only while every file it was built
+  from is unchanged.
+- **Objects next to a library:** a library's own unit (HMI widget library, its factory table, a simulator library
+  unit) carries a tag (`WasmCompileUnit.library`: name, kind, key). The key (`wasm-toolchain/library-objects.ts`) is a
+  digest of the archive, its dependencies' archives, the kind, the unit's flags and the provided header versions (the
+  HMI core API). Before compiling, the service reads the library's file of that kind (`WasmLibraryObjectStore`) and
+  offers its object to the session cache when the key and toolchain match; the cache still uses it only while every
+  file it was built from is unchanged. After a build, the object each tagged unit used is written back when it is not
+  the one already there. Desktop: `<userData>/libraries/<name>/<name>.<kind>.wasm-object` next to a user-installed
+  library's `.stlib` (`LibraryManagerModule.readLibraryObject`), removed with the library; bundled libraries keep
+  nothing there and use the shipped objects. A read or write that fails only costs the reuse.
+- **No precompiled headers:** every unit includes its headers directly. A clang worker's reply leaves out the binary
+  inputs it gets back unchanged, such as the objects of a link; text inputs come back from YoWASP as bytes and are
+  still sent.
+- **Clang worker:** one (`ClangWorkerPool`), running one job at a time, started by a build and ended once no build is
+  running or queued, whatever the last build's outcome, so the simulator runs with no clang worker; builds that overlap
+  share it. While an HMI tab is open (screen, widget block or HMI Settings), the workspace holds the toolchain
+  (`useHoldHmiToolchain` -> `HmiPreviewPort.holdToolchain` -> `WasmCompileService.setHeld`): the workers stay loaded
+  between builds, and the pool grows, one loading at a time while jobs wait, to `clangWorkerLimit`
+  (`worker-limit.ts`): one more per 640 MB of available memory beyond a 1 GB reserve, at most four and one less than
+  the processors, and one when the platform cannot tell its memory. Available memory is `vm_stat` on macOS,
+  `MemAvailable` on Linux, `os.freemem()` on Windows and a quarter of `navigator.deviceMemory` on the web (none on
+  Safari and iOS, so one worker there). The hold ends when the last HMI tab closes. A worker counts from its start until it has exited, and a new one starts only after the
+  previous one exited. A toolchain whose files cannot be got ready, a worker that cannot be started, or a worker that
+  fails or does not load within 120 s before it reports ready, fails the build with
+  `The WebAssembly compiler could not be loaded: <reason>`. Once a worker has loaded, one that fails or runs a job past
+  120 s is terminated and the job it ran fails with `The compiler worker stopped (<reason>).` On the web, a worker that
+  fails before it reports ready (not one past the 120 s load deadline) also has the toolchain's stored files deleted,
+  so the next build downloads them again, past the HTTP cache (`cache: 'reload'`).
+- **Web store:** `runtime-file-cache.ts` (`src/backend/shared/wasm-toolchain/`) is the web's Cache Storage store of the
+  runtime files and the workers' cache-first `fetch`; its worker `fetch` tries the HTTP cache, then the store, then
+  the network. After a load failure deletes a set's stored files, its next download skips both (`cache: 'reload'`). It ships in the shared surface but the desktop and the CLI do not use it (their files stay on disk).
+
+- **Desktop:** one worker thread (`src/backend/editor/wasm-toolchain/`); the worker is its own webpack
+  entry, `clang-worker.js`, built next to `main.js`. The renderer reaches it over the `wasm-toolchain:compile` IPC
+  channel.
+- **Startup:** while the splash is up the editor only checks that every toolchain file and every Python runtime file
+  is present; it starts no clang worker and no Python thread, and compiles nothing. A missing toolchain file keeps the
+  splash up with the reason and a Quit button; a missing Python runtime file only logs a warning. The Python file check
+  is the shared `requirePythonRuntimeFiles` (`src/backend/shared/python/python-runtime-files.ts`); the desktop only
+  reads the files.
+- **CLI:** one worker through the same pool, started by an OpenPLC Simulator build (`compile` for it, or `simulate`).
+- **Loader patch:** `patchYowaspLoader` (`src/backend/shared/wasm-toolchain/yowasp-loader-patch.ts`, shared with
+  openplc-web) replaces the one `options.fetchProgress ?? defaultFetchProgress` in the package's `gen/bundle.js`, so a
+  run with no `fetchProgress` (the shared host passes none) compiles each module straight from its URL and logs
+  nothing, and adds a one-line change notice at the top of `bundle.js`; `third-party-licenses/yowasp-clang/README.md`
+  names the patched line. `scripts/prepare-yowasp-clang.ts` writes the prepared copy `release/yowasp-clang/`
+  (git-ignored): `package.json`, `README.md` and `gen/**` of `node_modules/@yowasp/clang`, `gen/bundle.js` patched,
+  everything else byte for byte; it fails when the patch does not apply exactly once, and never writes `node_modules`.
+  It runs in `postinstall`, `prestart` and at the start of `build:main`, so `npm run dev`, `npm run build`,
+  `npm run package` and the CLI builds always have it. Outside a package the desktop and the CLI load clang from that copy, and
+  the worker's `load()` runs the shared `checkWasmToolchainPackage` (`src/backend/shared/wasm-toolchain/toolchain-files.ts`),
+  which refuses a missing file (`Missing toolchain file: <path>`) and a `bundle.js` that is not patched
+  (`The toolchain's loader is not patched: <path>`).
+- **Packaging:** the prepared copy (`release/yowasp-clang`) ships as the extra resource `yowasp-clang`, outside the asar archive, with its licences under `yowasp-clang/licenses/`. The `allow-jit`
+  entitlement in `assets/entitlements.mac.plist` lets it run under the hardened runtime.
+- **Running a module** happens in main-process worker threads (the simulator, Python), or, for the HMI preview, in a
+  Worker started from its own renderer bundle (`hmi-preview-worker.js`, a second entry of the renderer webpack
+  configs), which compiles WebAssembly with the page CSP unchanged; `e2e/hmi-preview-worker.spec.ts` checks it. Never
+  on the page itself: the renderer CSP (`src/index.ejs`) has no `'wasm-unsafe-eval'`.
+
+**Simulator build.** The OpenPLC Simulator target builds with this toolchain, not arduino-cli: the pipeline's
+simulator branch (`compileSimulatorModule` in `src/backend/shared/compile/pipeline.ts`) turns the composed firmware
+files into one request (`steps/build-simulator-wasm-request.ts`) and calls `CompilerPlatformPort.compileToWasm`. The
+sketch becomes `examples/Baremetal/Baremetal.cpp` with `Arduino.h` included and Arduino-style prototypes
+(`steps/ino-prototypes.ts`); the network stack and the Modbus TCP, OPC UA and S7 units are left out, Modbus RTU stays
+for the debugger. The firmware skeleton carries `resources/sources/wasm-sim/`: the host shim `sim_main.cpp`, a stub `Arduino.h` and the
+ArduinoCore-API (LGPL-2.1, commit `0f4e57ea`, licence in `wasm-sim/core/`). The module is a reactor that imports
+`env.host_clock_us` and `env.host_uart_write` and exports `sim_setup`, `sim_loop`, `sim_uart_receive` and
+`sim_scan_period_us`; time moves only when the host advances it. The simulator has no pins: its `defines.h` declares
+none and `resources/sources/hal/simulator.cpp` does no I/O. No Arduino core is installed for it.
+The desktop writes the module to `<build>/OpenPLC Simulator/simulator.wasm`. The editor builds the simulator only
+from Play; `e2e/wasm-simulator-build.spec.ts` builds through `openplc-cli compile`.
+Only this branch asks STruC++ for separate library files (`runProgramBuildPipeline({ separateLibraryFiles })`, giving
+`lib_<library>.cpp` and `generated_libraries.hpp`); every other target keeps its output. `steps/simulator-library-units.ts`
+takes those `lib_*.cpp` out and compiles each reached library, and the libraries it depends on, from a whole unit
+generated from its archive alone (`library/library-unit.ts`, under `simlib/<library>/`, dependencies passed to STruC++
+first), so a library's object is the same in every project and a program edit compiles no library unit. A rebuild
+after a body edit still compiles the program's units and every runtime unit that includes `defines.h`, which carries
+the program's MD5.
+
+**Updating the toolchain:** change the exact `@yowasp/clang` version in `package.json` in both repos (with both
+lockfiles, `pnpm-lock.yaml` included on the web) and `WASM_TOOLCHAIN_VERSION` in
+`src/backend/shared/wasm-toolchain/toolchain-identity.ts` (its test compares them), then run `yowasp-loader-patch.test.ts`
+(`src/backend/shared/wasm-toolchain/__tests__/`) in both repos, which fails when the new `bundle.js` drops or moves the
+patched line (re-check the patch then, in both repos), and `e2e/wasm-toolchain.spec.ts` in both repos, including the
+packaged-app case (`E2E_PACKAGED_APP`). The npm package carries no licence files, so the texts for YoWASP, LLVM and
+wasi-libc live in `third-party-licenses/yowasp-clang/` (in both repos, with their sources in its README)
+and ship next to the toolchain; refresh them from the commits the new release was built from.
+
+**Python blocks in the simulator.** Each Python block instance runs in its own CPython 3.13 interpreter (WASIX build,
+run by the Wasmer SDK, no network), in one long-lived worker thread of the main process (`python-worker.js`, built next
+to `main.js`; `src/backend/editor/python/`). The logic is shared and byte-identical with openplc-web in
+`src/backend/shared/python/`: the block host (one interpreter per instance, the runtime's 100 ms exchange over the
+wrapper's stdio transport, Console lines prefixed `[Block]`, a block that ends or fails keeps its last outputs, Stop
+kills them all), the thread protocol and the Wasmer runtime. The module starts a block through
+`wasm-sim/sim_python.cpp` (`env.host_python_block`), force-included header `wasm-sim/stub/iec_python.h`. The runtime
+starts only for a run with Python blocks (the splash only checks its files) and never stops the editor or a run: if it
+cannot load (or takes past 120 s), the PLC runs and each Python block reports the reason on the Console; the failure
+stays for the session. On the web, a load failure also deletes the Python runtime's stored files, so the next page
+load downloads them again, past the HTTP cache. On a page that is not cross-origin isolated (web) it is never started, and the blocks report
+`Python blocks cannot run here: the page is not cross-origin isolated.` Interpreters
+for a project's blocks boot right
+after its module compiles, and the PLC starts once they are ready (not during the compile: on WebKit that stalls the
+in-browser compiler). `openplc-cli simulate` (`src/cli/commands/simulate.ts`) runs the same simulator and loads
+Python only for a project with Python blocks; a toolchain that cannot load ends it (exit 4), a Python runtime that cannot
+load does not. A run keeps at most as many interpreters as fit in half of the computer's memory
+(`python-memory-budget.ts`).
+
+- **Assets:** the CPython package and the numpy wheel are pinned by sha256 in `python-runtime.json` and fetched at
+  install time into `vendor/python-runtime/` (`npm run setup:python`, part of `postinstall`; never committed, the
+  package is 161 MB). A packaged app ships them, with the Wasmer SDK and the licences in
+  `third-party-licenses/python-runtime/`, as the extra resources `python-runtime` and `wasmer-sdk`; users download
+  nothing.
+- **Updating:** change the pins in `python-runtime.json` in both repos (and the exact `@wasmer/sdk` version with both
+  lockfiles), run `setup:python -- --force`, refresh the licence texts, then run `e2e/python-blocks-play.spec.ts` in
+  both repos (WebKit included on the web) and `e2e/cli-simulate.spec.ts` in the editor.
+
+### Debugging
+
+- **Protocol:** Custom Modbus PDU: function codes 0x41-0x45 for variable read/write, and 0x46-0x4E for status, version, licensing, run/stop state, bootloader reboot, lock state and board ID provisioning (0x4E) (`resources/sources/Baremetal/modbus_types.h`); 0x48 reports the board's raw ID sources. A firmware built with `openplc-cli compile --hmi-test-readout` also answers the test-only HMI codes 0x4F and 0x50 (`resources/sources/hmi/README.md`)
+- **Transports:** Modbus TCP, Modbus RTU, WebSocket, or virtual serial (simulator)
+- **Simulator:** the project's WebAssembly module (`src/backend/shared/simulator/`): `WasmSimulatorModule` runs it
+  with simulated time (one scan period per scan, never ahead of the wall clock, in steps of at most 10 ms so the
+  serial service runs between scans), in a worker thread (`ThreadedSimulator` + `serveSimulatorThread`; desktop entry
+  `src/backend/editor/simulator/simulator-worker.ts`, built as `simulator-worker.js`). The debugger's Modbus RTU client
+  talks to it through `VirtualSerialPort`. Test fixtures, and how to rebuild them, are in
+  `src/backend/shared/simulator/__tests__/fixtures/README.md`.
+- **Flow:** Compile with debug symbols (.dbg file + MD5) -> connect debugger -> poll variables
+
+## Testing
+
+- **Unit:** Jest + jsdom, `npm run test` (CI: `npx jest --config jest.config.json --collectCoverage --ci`). Test files are `*.test.ts(x)`, `*.spec.ts(x)` or `__tests__/` directories. Mocks: `configs/mocks/` for file stubs, `identity-obj-proxy` for CSS modules.
+- **Store and ports in tests:** a fresh store from `createTestStore()`, rendered through
+  `createStoreWrapper(store, ports?)` (`src/frontend/store/testing.tsx`). Never module-mock the store or
+  the platform providers — `validate:arch` rejects it (openplc-web runs these shared tests without
+  per-file isolation, where such a mock would leak).
+- **Coverage:** per-directory floors are in `jest.config.json` (`coverageThreshold`).
+- **End-to-end:** Playwright specs in `e2e/` drive the built Electron app through `_electron.launch`; run them as described in "Electron e2e (Playwright)" above. CI runs the `debug-*` specs only.
+- **HMI C core:** `resources/sources/hmi/` (mirrored to openplc-web `src/assets/firmware/hmi/`) is tested by
+  `tests/hmi-core/run.mjs` (`npm run test:hmi-core`, CI job `ci-hmi-core.yml`), not by Jest; see
+  `resources/sources/hmi/README.md`.
+- **HMI widget libraries:** the ST libraries of the HMI live in their own repository,
+  [openplc-hmi-widgets](https://github.com/Autonomy-Logic/openplc-hmi-widgets), released as plain STruC++ `.stlib`
+  archives: `standard-widgets` (element base, widgets, keyboard, screen base, runtime) and `hmi-alarms` (the PLC side
+  of the alarm and event widgets), with `LICENSE`, `LICENSING.md` and `SHA256SUMS`, the release's only index.
+  `binary-versions.json` pins the release (`hmi-widgets`: tag, repository, `sumsSha256` = SHA-256 of `SHA256SUMS`)
+  and `npm run setup:hmi-widgets` (part of `postinstall`; `scripts/download-binaries.ts` over the shared
+  `widgets-release-setup.ts`) installs every file `SHA256SUMS` lists into `vendor/hmi-widgets/` after checking it
+  against the pin and each file against it. It fails, saying so, when the release is not published;
+  `OPENPLC_HMI_WIDGETS_DIR=<openplc-hmi-widgets>/dist` installs a local build instead. Packaged builds ship the
+  directory as the extra resource `hmi-widgets`, listed by the library manager as bundled: always on, not removable.
+- **One kind of library, requirements per POU:** every `.stlib` is the same thing. STruC++ records on each chunk the
+  headers its `{external}` code needs, transitively (callees, bases, other archives), with the API version, and each
+  archive's `dependencies`. A build states what it provides: every PLC build (program, debug, simulator, Runtime v4,
+  baremetal, CLI) passes `providedHeaders: PLC_PROVIDED_HEADERS` (`[]`), every HMI build (preview, thumbnails, Runtime
+  v4 `hmi.wasm`, panel firmware) `HMI_PROVIDED_HEADERS` (`hmi_core.h` at `HMI_CORE_API_VERSION`), and STruC++ fails a
+  POU the unit uses whose requirements are not met, naming it.
+- **Library selection:** a project uses the bundled libraries and the libraries it lists (`project.json`
+  `libraries`), never another installed library; a listed library that is not installed shows the missing-libraries
+  warning. Builds take `selectBuildLibraryArchives` (PLC, HMI and library-project builds); the HMI preview, palette,
+  thumbnails and HMI code view take the names from `projectLibraryNames` and `selectProjectLibraryArchives`
+  (`src/middleware/shared/utils/library/project-libraries.ts`). The PLC library tree, block pickers and PLC
+  completions list only POUs a PLC build of the project can use, over those libraries (`plcUnusablePous`,
+  `useProjectPlcLibraries`, `projectPlcUnusablePous`). A widget is a function block whose EXTENDS chain, by STruC++'s
+  `functionBlockLineage`, reaches `HMIELEMENT` (`buildWidgetCatalog`, with its `hmi_*` pragmas); there is no
+  library-level classification. `HMI_CORE_API_VERSION` (`src/middleware/shared/utils/hmi/widget-libraries.ts`) equals the
+  `HMI_CORE_API_VERSION` macro of `hmi_core.h` (a Jest test ties them); a library whose chunks need another version is
+  left out of HMI builds with one warning (library manager and Console), and setup refuses such a release.
+- **Library projects** build against the bundled libraries and those they list, declare only the headers their own
+  `{external}` code includes (`library.json` `headers`), and author HMI widget blocks: the + menu's Widget creates one
+  under `hmi/widgets/` extending `HmiElement`, and the library build compiles it into the archive, where it needs the
+  HMI core through that base (STruC++ records it on the chunk) while the library's plain blocks stay usable in PLC
+  builds. `e2e/hmi-widget-libraries.spec.ts` and `e2e/library-widget.spec.ts` cover installed and authored widget
+  libraries end to end.
+- **HMI unit generator:** `src/backend/shared/hmi/unit/` turns screens, widget blocks and HMI Settings
+  (`src/middleware/shared/utils/hmi/settings.ts`) into the HMI unit: C++ in namespace `hmi` plus the C glue hosts
+  link (`resources/sources/hmi/unit/hmi_unit.h`; preview setters in `hmi_preview.h`). `tests/hmi-unit/run.mjs`
+  (`npm run test:hmi-unit`, same CI job) builds a sample project's unit and runs it from a C host.
+- **HMI preview:** `src/backend/shared/hmi/preview/` builds screens and widget blocks with the WebAssembly toolchain
+  and runs them in a Worker (`createHmiPreviewPort`; host `resources/sources/hmi/preview/`). Each screen compiles
+  against its own copy of the unit header (`split-screen-headers.ts`), so an edit of one screen recompiles that screen
+  and the glue only. The running module also follows structural edits without a build: the preview-only
+  factory table (`hmi_preview_factory.cpp`, generated for preview builds only, with `hmi_preview_live.cpp`) creates any
+  widget type, and any element, compiled or made, can be taken off its container and the drawing list and put back
+  elsewhere. `designer-live.ts` diffs the screen the module shows against the source (`planLiveSync`): removed elements
+  are taken off, moved ones (another container, another place among their siblings) are taken off and put back, new
+  ones are made, and changed values go through the live setters, so add, remove, move, reorder, diagram moves, value
+  edits and their undo and redo are drawn at once, exactly as the build will; the build that follows replaces the
+  module with the same pixels. Code and theme changes, pipes put back or chained anew, references to removed
+  elements and values that cannot be set live wait for the build; code that still names a removed element does not
+  (the build reports it). Such a build shows its progress over the last frame, dimmed, after 300 ms; a build after a
+  live edit shows none and waits 1.5 s for the next edit. `tests/hmi-preview/run.ts` (`npm run test:hmi-preview`, same
+  CI job) does it with the real toolchain, checks rebuild times and that every live step, undone and redone, has the
+  rebuilt module's frame and bounds, and prints each build's breakdown. The port also draws the palette's thumbnails from a generated gallery screen
+  (`hmi-thumbnails.ts`). Units include their headers directly; there is no precompiled header.
+- **Widget library units:** the preview and the Runtime v4 build compile each widget library from its archive alone
+  (`hmi/lib-object/library-unit.ts`: STruC++ on the archive and its dependencies, whole, in namespace `hmi`, with
+  `HMI_LIBRARY_CXX_FLAGS` in both builds) and take STruC++'s `lib_<name>.cpp` out of the generated unit, whose
+  libraries header would make it depend on the project's PLC libraries and widget blocks. One library is one object
+  in every project, preview or `hmi.wasm`. For the preview each library also gets its own factory table
+  (`hmilib/<library>/<library>_factory.cpp`, `unit/preview-factory.ts`), generated from the library alone; the
+  unit's `hmi_preview_factory.cpp` holds only a table of the project's widget blocks and the dispatcher that numbers
+  the tables one after another. The live elements' code (`hmi_preview_live.cpp`) compiles on its own against the
+  library that declares `HmiScreen` (`hmilib/<library>/hmi_preview_widgets.hpp`), so it is shipped too; without such a
+  library it falls back to the unit's libraries header.
+- **HMI on Runtime v4:** the browser runs the screens. `src/backend/shared/hmi/artefact/` builds the upload's `hmi/`:
+  `client/hmi.wasm` (unit, core, fonts and `resources/sources/hmi/client/hmi_browser_host.cpp`) and, for the device,
+  only the data manifest `src/hmi_access.c` (`resources/sources/hmi/unit/hmi_access.h`): each screen's read and write
+  tag lists (`unit/page-access.ts`) and roles, which the runtime's host enforces. `tests/hmi-client/run.ts`
+  (`npm run test:hmi-client`) builds it with the real toolchain.
+- **HMI designer:** `src/frontend/components/_features/[workspace]/editor/hmi/designer/` edits a screen's ST as text
+  patches (`src/middleware/shared/utils/hmi/designer/`), with undo in the `hmiDesigner` store slice. In a diagram it
+  places symbols on the grid, draws pipes from port to port and edits their bends (`designer-diagram.ts`), from the
+  ports, diagram frames and pipe routes a design-mode frame records. `e2e/hmi-designer.spec.ts` and
+  `e2e/hmi-diagram.spec.ts` drive it on the real preview; `e2e/hmi-live-add.spec.ts` holds every compile back and
+  checks that dropped, pasted, removed, reordered, moved and edited widgets, undone and redone, show at once and
+  survive the build that replaces the module, and that only edits that wait for a build show its progress.
+- **Manual:** the developer's manual test is required for every demand.
+
+## Code Style
+
+- TypeScript `strict: true` (`tsconfig.json`); ESLint flat config (`eslint.config.mjs`) extends `tseslint.configs.recommendedTypeChecked`, which makes `@typescript-eslint/no-explicit-any` an error (test files are ignored by ESLint)
+- Prettier: 120 char width, no semicolons, single quotes, trailing commas
+- Import sorting enforced via `simple-import-sort` plugin
+- `lint-staged` is configured in `package.json`, but no Husky hook is committed (no `.husky/` directory), so nothing runs on commit
+- Path alias: `@root/*` -> `./src/*`
+
+### TypeScript Best Practices
+
+- No type assertions: `as` hides real type errors — fix the type at the source or narrow with type guards. `as const` is fine; `as unknown as T` is forbidden.
+- No non-null assertions (`!`): handle the undefined case or narrow explicitly.
+- No `@ts-ignore`/`@ts-expect-error` without a one-line justification.
+- Validate external data at the boundary (IPC payloads, project files, downloaded binaries metadata) with schemas (zod) or type guards instead of casting.
+- No floating promises: `await` or handle rejection explicitly — async errors must not disappear.
+- Prefer `??` over `||` for defaults when `0`, `''`, or `false` are valid values.
+- Model variant states as discriminated unions; make `switch` exhaustive with a `never` check.
+- Named exports over default exports.
+- Zustand state changes only through slice actions — never mutate store values from components.
+
+## Key Technologies
+
+- **Electron 37** (the last line that still runs on macOS 11) / **React 18** / **TypeScript** (target ES2022)
+- **Webpack** (not Vite) with separate main/renderer/preload configs
+- **Zustand 5** + **Immer** for state management
+- **Monaco Editor** for code editing (ST, IL, Python, C++)
+- **@xyflow/react 12** for FBD/SFC graphical editors
+- **@dnd-kit** for drag-and-drop (tabs, ladder rungs)
+- **Tailwind CSS 3** + **Radix UI** for styling
+- **Zod** for schema validation
+- **i18next** for internationalization
+- **Axios** for HTTP requests
+- **Socket.io** for real-time communication
+- **Winston** for structured logging (main process)
+- **serialport** for serial communication
+- **ssh2** for installing or starting the OpenPLC Runtime on a device over SSH (main process only, `src/main/modules/runtime-provisioning/`; remembered host keys in `userData/ssh-known-hosts.json`)
+- **pdf-lib** + **@pdf-lib/fontkit** for PDF export (print/export-to-PDF)
+
+## Important Patterns
+
+### When bumping the app version:
+`APP_VERSION` in `src/frontend/data/constants/app-version.ts` is the **single
+source of truth** for the human-facing version, shared **byte-for-byte** between
+openplc-editor and openplc-web (enforced by the mirror gate / `compare-surfaces.py`).
+The About modal renders it directly; the web build writes it into `version.json`.
+
+**Bump `APP_VERSION` — never `package.json` alone.** Make the identical one-line
+edit in BOTH repos, and set `package.json.version` to the same value in both so
+they can't drift. Roles: `APP_VERSION` is what the user sees in the About dialog;
+`package.json.version` is what a local build stamps. Bumping only `package.json`
+leaves the About dialog stuck on the old version. If those two disagree, `APP_VERSION`
+is authoritative; fix `package.json` to match.
+
+**The release tag must equal `APP_VERSION` too.** `release.yml` stamps the binary
+from the tag while About renders `APP_VERSION`, so tagging `v4.3.0` while
+`APP_VERSION` is 4.2.12 ships an installer named 4.3.0 whose About dialog says
+4.2.12 — the same failure in a different disguise. Check before tagging: a pushed
+tag cannot be "fixed to match".
+
+In the editor, electron-builder reads **`release/app/package.json`**, not the root
+one — `electron-builder.json` sets `directories.app` to `release/app`. The release
+workflow runs `npm version <tag>` at the root AND in `release/app`, so a
+*tag-triggered* release is always correct. Two cases are not: a LOCAL package
+build takes whatever `release/app/package.json` says, and a `workflow_dispatch`
+run with an empty `version` input falls back to root `package.json`
+(`release.yml`, version resolution). Use `npm version <v> --no-git-tag-version
+--allow-same-version` in both places rather than editing by hand: it updates each
+lockfile too, which hand edits miss.
+
+Release mechanics, in order: bump `APP_VERSION` and `package.json` to the same value in both
+repos and merge to `development`; promote `development` to `main` in both repos; then tag `vX.Y.Z`
+(equal to `APP_VERSION`) on openplc-editor's `main`, which triggers `release.yml` ("Build and
+Release"). openplc-web has no release workflow: `production-cd.yml` deploys on every push to its
+`main`, and `staging-cd.yml` on pushes to `development`.
+
+**Release mode.** A run of `release.yml` on a `v*` tag (a tag push, or a dispatch on the tag) is
+release mode: its `trust-module` job, in the GitHub Environment `release-trust` (secret
+`TRUST_SEED_SECRET`, approved by a required reviewer), generates the build's trust module, and the
+five build jobs download it and build with `OPENPLC_RELEASE_BUILD=1`. A dispatch on a branch builds with the development seed and publishes
+nothing. Every run reads the fuses of each built executable (`scripts/release/read-fuses.mjs`), scans
+the unpacked output for the trusted key (`scan-trust-literals.mjs`) and runs `packaged-checks` on the
+macOS arm64, Windows x64 and Linux x64 installers; `create-release` runs `check-upload-set.mjs` and
+uploads exactly the six installers.
+
+**Installers of a published release are replaced only through `rebuild-release.yml`** (modes
+`rebuild`, `dry-run`, `verify`, `seed-audit`), from the release's backport branch
+`feature/<KEY>-backport-v<version>`, and only after a rehearsal on a draft release
+(`v<version>-rehearsal`) passed. A backport branch never gets a `v*` tag: the tag would start
+`release.yml`. Procedure and checks: `docs/release-hardening.md`.
+
+### Update notice (never publish `latest*.yml`):
+The editor checks the GitHub releases API once per launch and, when a newer
+version is out, shows a banner at the top of the window ("Update" and an X);
+Update downloads that OS's installer, checks its sha256 against the release and
+opens it. The user installs (DOPE-486, `docs/update-notice.md`). The release
+pipeline needs nothing for it. The Windows installer is an assisted NSIS
+installer (`assets/installer.nsh`) that asks the user to close a running editor
+and never kills it; keep `oneClick: false`. **Never add `latest-mac.yml` / `latest-linux*.yml` / `latest.yml`
+to a release**: every editor from 4.1.0 to 4.3.2 still embeds electron-updater's
+`app-update.yml` and would install it without asking, unsigned on Windows.
+`rebuild-release.yml` keeps the same rule, and a same-version rebuild gives no update notice; while an
+installer is being replaced its name is absent for a few seconds (`docs/update-notice.md`).
+
+### When adding a new port:
+1. Define the interface in `src/middleware/shared/ports/`
+2. Add it to `PlatformPorts` in `src/middleware/shared/providers/types.ts`
+3. Add a convenience hook in `src/middleware/shared/providers/platform-context.tsx`
+4. Implement the editor adapter in `src/middleware/adapters/editor/`
+5. Wire it in `src/middleware/editor-platform.ts`
+
+### When adding a new store slice:
+1. Create `types.ts`, `slice.ts`, `index.ts` in `src/frontend/store/slices/<name>/`
+2. Add the slice type to `RootState` union in `src/frontend/store/index.ts`
+3. Spread the slice creator in `createOpenPLCStore()`
+4. Add tests with it, so the directory stays above its coverage floor
+
+### When adding a new POU language or type:
+1. Update project parser (`src/backend/shared/utils/parse-project-files.ts`)
+2. Update serializer for save flow
+3. Add editor component if graphical
+4. Register in library system and project actions
+
+### When modifying graphical editors:
+1. Flow state is stored separately from POU body during editing
+2. Sync flows back to POU on save
+3. Relink variables after variable table changes
+4. Node IDs must be unique per flow
+
+### IEC address allocation + alias registry
+
+Located in `src/middleware/shared/utils/iec-address/` (byte-identical on
+openplc-web). Pure functions, no IPC, no electron coupling.
+
+- **Address pool** (`address-pool.ts`): producer-only, target-scoped
+  view of every claimed IEC address. Producers = pin mapping, VPP
+  module slots, Modbus TCP remote IO points, EtherCAT channel
+  mappings. Capability scoping comes from `target-capabilities` —
+  switching targets activates / deactivates entire producers.
+  - Reservation pass: pin-mapping (Arduino-style fixed addresses).
+  - Allocation pass: every other producer in deterministic order.
+  - `nextFreeAddress(pool, prefix, isBit, startFrom?, alsoUsed?)`
+    replaces the old `generateIecAddress` helper. Pass `alsoUsed` for
+    in-flight allocations within a batch.
+- **Alias registry** (`alias-registry.ts`): derived index on top of
+  the pool. `byAlias` map plus `duplicateAliases` (first-wins). Pure
+  function — rebuild on demand, cost is O(producers).
+- **Compile-time resolution** (`registry/resolve.ts`): a variable's
+  `location` holds EITHER an alias name OR a literal `%addr`
+  (single-field model). `buildAliasIndex(registry)` builds the
+  `alias → address` map; `resolveLocation(field, index)` resolves a
+  variable's `location` for the compiler:
+  - literal `%…` → used verbatim (manual locations honoured exactly);
+  - alias that still exists → its current address;
+  - alias that is gone → `''` (variable becomes unlocated).
+  The compiler/runtime never see aliases: the editor resolves them in
+  a pre-compile snapshot via the
+  `projectActions.getCompileReadyProjectData()` store action. When a
+  producer alias is renamed, `projectActions.renameAlias(old, new)`
+  cascades onto every bound variable's `location`.
+
+The variable cell renders `location` verbatim — the alias name when
+alias-bound, the `%addr` when a manual literal — and shows an amber
+warning glyph + tooltip when an alias-bound location no longer resolves
+(orphaned) or when a manual `%addr` collides with an alias another
+project variable is bound to (duplicate-location risk). Aliases are
+intended to be unique system-wide; every IO-mapping / pin /
+remote-device editor calls the registry's
+`validateAliasEdit(registry, name, ignoring)` gate before persisting a
+new alias.
+
+## Environment
+
+- **Node.js:** 22.x
+- **Dev server port:** 1313
+- **Supported platforms:** macOS, Windows, Linux (x64 & ARM64)
+- **Binaries:** Auto-downloaded via `scripts/download-binaries.ts` during `npm install`

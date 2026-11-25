@@ -1,0 +1,133 @@
+{
+  "OpenPLC Simulator": {
+    "compiler": "simulator",
+    "source": "simulator.cpp",
+    "preview": "simulator.png",
+    "specs": {
+      "Runtime": "WebAssembly-based runtime",
+      "Python blocks": "Supported (numpy included)",
+      "C/C++ blocks": "Arduino API, hardware-independent"
+    },
+    "cxx_flags": [
+      "-std=gnu++17"
+    ],
+    "capabilities": {
+      "pinMapping": false,
+      "vppIo": false,
+      "modbusTcpRemote": true,
+      "ethercat": true,
+      "modbusTcpServer": true,
+      "opcuaServer": true,
+      "s7Server": true,
+      "debuggerTransports": [
+        "modbus-serial"
+      ],
+      "pythonFunctionBlocks": true,
+      "arduinoApiCompletions": true,
+      "hasRuntimeStats": false,
+      "isInProcessSimulator": true,
+      "hmiDataWidgets": false,
+      "directUsbUpload": true
+    },
+    "debug": {
+      "channels": [
+        {
+          "label": "Simulator",
+          "channel": "simulator",
+          "enabledWhen": true,
+          "params": {}
+        }
+      ]
+    }
+  },
+  "OpenPLC Runtime v3": {
+    "compiler": "openplc-compiler",
+    "preview": "generic.png",
+    "cxx_flags": [
+      "-std=gnu++17"
+    ],
+    "capabilities": {
+      "pinMapping": false,
+      "vppIo": false,
+      "modbusTcpRemote": false,
+      "ethercat": false,
+      "modbusTcpServer": false,
+      "opcuaServer": false,
+      "s7Server": false,
+      "debuggerTransports": [
+        "modbus-tcp"
+      ],
+      "pythonFunctionBlocks": true,
+      "arduinoApiCompletions": false,
+      "hasRuntimeStats": false,
+      "isInProcessSimulator": false,
+      "hmiDataWidgets": false,
+      "directUsbUpload": false
+    },
+    "debug": {
+      "preconditions": [
+        "runtimeConnected"
+      ],
+      "channels": [
+        {
+          "label": "Modbus TCP",
+          "channel": "tcp",
+          "enabledWhen": true,
+          "params": {
+            "ipAddress": {
+              "$ref": "configuration.runtimeIpAddress",
+              "required": "Runtime IP address is not configured."
+            }
+          }
+        }
+      ]
+    }
+  },
+  "OpenPLC Runtime v4": {
+    "compiler": "openplc-compiler",
+    "preview": "generic.png",
+    "cxx_flags": [
+      "-std=gnu++17"
+    ],
+    "capabilities": {
+      "pinMapping": false,
+      "vppIo": false,
+      "modbusTcpRemote": true,
+      "ethercat": true,
+      "modbusTcpServer": true,
+      "opcuaServer": true,
+      "s7Server": true,
+      "debuggerTransports": [
+        "websocket"
+      ],
+      "pythonFunctionBlocks": true,
+      "arduinoApiCompletions": false,
+      "hasRuntimeStats": true,
+      "isInProcessSimulator": false,
+      "hmiDataWidgets": true,
+      "directUsbUpload": false
+    },
+    "debug": {
+      "preconditions": [
+        "runtimeConnected",
+        "jwtToken"
+      ],
+      "channels": [
+        {
+          "label": "WebSocket",
+          "channel": "websocket",
+          "enabledWhen": true,
+          "params": {
+            "ipAddress": {
+              "$ref": "configuration.runtimeIpAddress"
+            },
+            "jwtToken": {
+              "$ref": "runtimeConnection.jwtToken",
+              "required": "JWT token missing. Reconnect to the runtime."
+            }
+          }
+        }
+      ]
+    }
+  }
+}
