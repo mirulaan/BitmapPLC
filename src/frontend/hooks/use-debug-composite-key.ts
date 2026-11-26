@@ -28,14 +28,28 @@ export const useDebugCompositeKey = () => {
     return instances.find((inst) => inst.key === selectedKey) || null
   }, [pouType, editorName, fbSelectedInstance, fbDebugInstances])
 
+  const pouVariables = useOpenPLCStore(
+    useCallback((s) => s.project.data.pous.find((p) => p.name === s.editor.meta.name)?.interface?.variables, []),
+  )
+  const externalVarNames = useMemo(() => {
+    const set = new Set<string>()
+    for (const v of pouVariables ?? []) {
+      if (v.class === 'external') set.add(v.name.toLowerCase())
+    }
+    return set
+  }, [pouVariables])
+
   const getCompositeKey = useCallback(
     (variableName: string): string => {
+      if (externalVarNames.has(variableName.toLowerCase())) {
+        return `Config0:${variableName}`
+      }
       if (fbInstanceContext) {
         return `${fbInstanceContext.programName}:${fbInstanceContext.fbVariableName}.${variableName}`
       }
       return `${editorName}:${variableName}`
     },
-    [fbInstanceContext, editorName],
+    [externalVarNames, fbInstanceContext, editorName],
   )
 
   return getCompositeKey
