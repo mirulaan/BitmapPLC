@@ -71,6 +71,14 @@ import type {
   Stash,
   VersionControlResult,
 } from '@root/middleware/shared/ports/version-control-port'
+import type {
+  Vc3000ActionResult,
+  Vc3000ConnectConfig,
+  Vc3000DetectedPort,
+  Vc3000LightChannelConfig,
+  Vc3000Polarity,
+  Vc3000Status,
+} from '@root/middleware/shared/ports/vc3000-types'
 import type { WasmCompileRequest, WasmCompileResult } from '@root/middleware/shared/ports/wasm-toolchain-types'
 import { CreatePouFileProps, PouServiceResponse } from '@root/types/IPC/pou-service'
 import { CreateProjectFileProps, IProjectServiceResponse } from '@root/types/IPC/project-service'
@@ -931,5 +939,16 @@ const rendererProcessBridge = {
     ipcRenderer.on('file:external-change', callback)
     return () => ipcRenderer.removeListener('file:external-change', callback)
   },
+
+  vc3000GetStatus: (): Promise<Vc3000Status> => ipcRenderer.invoke('vc3000:get-status'),
+  vc3000ScanPorts: (candidatePorts: string[]): Promise<Vc3000ActionResult<Vc3000DetectedPort[]>> =>
+    ipcRenderer.invoke('vc3000:scan-ports', candidatePorts),
+  vc3000Connect: (config: Vc3000ConnectConfig): Promise<Vc3000ActionResult<Vc3000Status>> =>
+    ipcRenderer.invoke('vc3000:connect', config),
+  vc3000Disconnect: (): Promise<Vc3000ActionResult<Vc3000Status>> => ipcRenderer.invoke('vc3000:disconnect'),
+  vc3000SetPolarity: (target: 'DI' | 'DO', polarity: Vc3000Polarity): Promise<Vc3000ActionResult<Vc3000Status>> =>
+    ipcRenderer.invoke('vc3000:set-polarity', { target, polarity }),
+  vc3000SetLight: (config: Vc3000LightChannelConfig): Promise<Vc3000ActionResult<Vc3000Status>> =>
+    ipcRenderer.invoke('vc3000:set-light', config),
 }
 export default rendererProcessBridge

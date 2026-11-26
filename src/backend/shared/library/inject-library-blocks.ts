@@ -51,6 +51,7 @@
 import { parseHybridPouFromString } from '../../../frontend/utils/PLC/pou-text-parser'
 import type { StlibArchiveDTO } from '../../../middleware/shared/ports/library-port'
 import type { PLCPou, PLCProjectData } from '../../../middleware/shared/ports/types'
+import { COMMUNICATION_LIBRARY_ARCHIVE } from '../../../middleware/shared/ports/communication-library'
 
 /** One native block an archive ships, resolved to its authored source. */
 type ResolvedNativeBlock = {
@@ -76,10 +77,13 @@ function resolveNativeBlocks(
   const blocks: ResolvedNativeBlock[] = []
   const librariesMissingSource = new Set<string>()
 
-  if (!projectData.libraries || projectData.libraries.length === 0) {
+  const enabledNames = new Set((projectData.libraries ?? []).map((ref) => ref.name))
+  if (projectUsesCommunicationBlocks(projectData)) {
+    enabledNames.add(COMMUNICATION_LIBRARY_ARCHIVE.manifest.name)
+  }
+  if (enabledNames.size === 0) {
     return { blocks, librariesMissingSource: [] }
   }
-  const enabledNames = new Set(projectData.libraries.map((ref) => ref.name))
 
   for (const archive of archives) {
     const libraryName = archive.manifest?.name
@@ -123,8 +127,23 @@ function resolveNativeBlocks(
  * therefore derived exactly as they are for a user-authored block: one parser,
  * one representation, nothing for the archive to hold stale.
  */
+function projectUsesCommunicationBlocks(projectData: PLCProjectData): boolean {
+  const commBlockNames = ['TCP_SERVER_FB', 'TCP_CLIENT_FB', 'TCP_SEND_FB', 'TCP_RECV_FB']
+  return projectData.pous.some((pou) => {
+    const vars = pou.interface?.variables ?? []
+    if (vars.some((v) => commBlockNames.includes(String(v.type?.value ?? '').toUpperCase()))) {
+      return true
+    }
+    const bodyText = typeof pou.body?.value === 'string' ? pou.body.value : ''
+    return commBlockNames.some((name) => bodyText.includes(name))
+  })
+}
+
 export function injectLibraryBlocks(projectData: PLCProjectData, archives: StlibArchiveDTO[]): PLCProjectData {
-  const { blocks } = resolveNativeBlocks(projectData, archives)
+  const hasComm = archives.some((a) => a.manifest?.name === COMMUNICATION_LIBRARY_ARCHIVE.manifest.name)
+  const effectiveArchives =
+    !hasComm && projectUsesCommunicationBlocks(projectData) ? [...archives, COMMUNICATION_LIBRARY_ARCHIVE] : archives
+  const { blocks } = resolveNativeBlocks(projectData, effectiveArchives)
   if (blocks.length === 0) return projectData
 
   // The project's own POUs win a name clash, so a library block that collides

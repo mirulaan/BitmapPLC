@@ -33,6 +33,7 @@ import { DeviceEditorSlot } from '../../../../../_templates/[editors]/device-edi
 import { DeviceLicenseStatus } from './components/device-license-status'
 import { PinMappingTable } from './components/pin-mapping-table'
 import { RuntimeCommercialLicenseStatus } from './components/runtime-commercial-license-status'
+import { Vc3000ConfigPanel } from './vc3000-config-panel'
 
 type RuntimeConnectActivity = {
   label: string
@@ -815,6 +816,9 @@ const Board = memo(function () {
         const showDivider = !isSim && pinMappingEnabled
         return showDivider ? <hr id='container-split' className='h-[1px] w-full self-stretch bg-brand-light' /> : null
       })()}
+      {deviceBoard === 'HIK VC3000' && (
+        <Vc3000ConfigPanel availablePorts={availableCommunicationPorts.map((p) => p.address)} />
+      )}
       {!isSimulatorTarget(currentBoardInfo) && pinMappingEnabled && (
         <div id='pin-mapping-container' className='flex h-3/5 w-full flex-col gap-4'>
           <div id='pin-mapping-table-header-container' className='flex h-fit w-full justify-between'>

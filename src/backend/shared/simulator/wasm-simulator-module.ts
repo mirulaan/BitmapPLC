@@ -115,9 +115,19 @@ function readExports(instance: WebAssembly.Instance): SimulatorExports {
   }
 }
 
+/** Optional host TCP handler for simulator TCP_SERVER_FB / TCP_CLIENT_FB / TCP_SEND_FB / TCP_RECV_FB. */
+export interface SimulatorTcpHandler {
+  serverStep(en: boolean, port: number): { active: boolean; clientCount: number; error: boolean }
+  clientStep(en: boolean, host: string, port: number): { connected: boolean; connId: number; error: boolean }
+  send(en: boolean, connId: number, data: string, endChar: string): { done: boolean; error: boolean }
+  recv(en: boolean, connId: number): { newData: boolean; data: string; error: boolean }
+  stopAll(): void
+}
+
 /** One simulator run. `stop()` ends it for good; a new run takes a new instance. */
 export class WasmSimulatorModule implements UartSimulator, SimulatorPythonBus {
   onUartByte: ((byte: number) => void) | null = null
+  onTcpHandler?: SimulatorTcpHandler
   onPythonBlock: ((block: SimulatorPythonBlock) => void) | null = null
   /** Text the program wrote to standard output or standard error, one line at a time. */
   onLog: ((line: string, stream: SimulatorLogStream) => void) | null = null
@@ -274,6 +284,82 @@ export class WasmSimulatorModule implements UartSimulator, SimulatorPythonBus {
             outPointer,
             outSize,
           }),
+        host_tcp_server_step: (
+          en: number,
+          port: number,
+          activePtr: number,
+          clientCountPtr: number,
+          errorPtr: number,
+        ) => {
+          const view = new DataView(this.memoryBuffer())
+          const res = this.onTcpHandler?.serverStep(en !== 0, port) ?? {
+            active: false,
+            clientCount: 0,
+            error: false,
+          }
+          view.setUint8(activePtr, res.active ? 1 : 0)
+          view.setInt16(clientCountPtr, res.clientCount, true)
+          view.setUint8(errorPtr, res.error ? 1 : 0)
+        },
+        host_tcp_client_step: (
+          en: number,
+          hostPtr: number,
+          hostLen: number,
+          port: number,
+          connectedPtr: number,
+          connIdPtr: number,
+          errorPtr: number,
+        ) => {
+          const view = new DataView(this.memoryBuffer())
+          const host = new TextDecoder().decode(this.bytesAt(hostPtr, hostLen))
+          const res = this.onTcpHandler?.clientStep(en !== 0, host, port) ?? {
+            connected: false,
+            connId: 0,
+            error: false,
+          }
+          view.setUint8(connectedPtr, res.connected ? 1 : 0)
+          view.setInt16(connIdPtr, res.connId, true)
+          view.setUint8(errorPtr, res.error ? 1 : 0)
+        },
+        host_tcp_send: (
+          en: number,
+          connId: number,
+          dataPtr: number,
+          dataLen: number,
+          endPtr: number,
+          endLen: number,
+          donePtr: number,
+          errorPtr: number,
+        ) => {
+          const view = new DataView(this.memoryBuffer())
+          const decoder = new TextDecoder()
+          const data = decoder.decode(this.bytesAt(dataPtr, dataLen))
+          const endChar = decoder.decode(this.bytesAt(endPtr, endLen))
+          const res = this.onTcpHandler?.send(en !== 0, connId, data, endChar) ?? { done: false, error: false }
+          view.setUint8(donePtr, res.done ? 1 : 0)
+          view.setUint8(errorPtr, res.error ? 1 : 0)
+        },
+        host_tcp_recv: (
+          en: number,
+          connId: number,
+          newDataPtr: number,
+          outPtr: number,
+          outCap: number,
+          outLenPtr: number,
+          errorPtr: number,
+        ) => {
+          const view = new DataView(this.memoryBuffer())
+          const res = this.onTcpHandler?.recv(en !== 0, connId) ?? { newData: false, data: '', error: false }
+          let writtenLen = 0
+          if (res.newData && res.data.length > 0 && outCap > 0) {
+            const encoded = new TextEncoder().encode(res.data)
+            writtenLen = Math.min(encoded.length, outCap)
+            new Uint8Array(this.memoryBuffer(), outPtr, writtenLen).set(encoded.subarray(0, writtenLen))
+          }
+          view.setUint8(newDataPtr, res.newData ? 1 : 0)
+          view.setInt32(outLenPtr, writtenLen, true)
+          view.setUint8(errorPtr, res.error ? 1 : 0)
+        },
       },
       wasi_snapshot_preview1: wasi,
     }

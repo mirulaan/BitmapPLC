@@ -3,6 +3,7 @@ import { StateCreator } from 'zustand'
 
 import { bundledLibraryNames } from '../../../../middleware/shared/utils/hmi/widget-libraries'
 import { libraryPouRequirements } from '../../../../middleware/shared/utils/library/pou-requirements'
+import { COMMUNICATION_LIBRARY_ARCHIVE } from '../../../../middleware/shared/ports/communication-library'
 import { librariesOwningTypes } from '../../../utils/library-usage'
 import { stlibsToSystemLibraries } from '../../../utils/stlib-to-system-library'
 import type { SharedRootState } from '../shared/types'
@@ -181,10 +182,14 @@ const createLibrarySlice: StateCreator<LibrarySlice, [], [], LibrarySlice> = (se
       },
       applyInstalledLibraries: (archives, installed) => {
         const actions = getState().libraryActions
-        const requirements = libraryPouRequirements(archives)
-        actions.setSystemLibraries(stlibsToSystemLibraries(archives, requirements))
+        const commName = COMMUNICATION_LIBRARY_ARCHIVE.manifest.name
+        const hasComm = archives.some((a) => a.manifest?.name === commName)
+        const allArchives = hasComm ? archives : [...archives, COMMUNICATION_LIBRARY_ARCHIVE]
+        const requirements = libraryPouRequirements(allArchives)
+        actions.setSystemLibraries(stlibsToSystemLibraries(allArchives, requirements))
         actions.setPouRequirements(requirements)
-        actions.setBundledLibraryNames(bundledLibraryNames(installed))
+        const bundled = bundledLibraryNames(installed)
+        actions.setBundledLibraryNames(bundled.includes(commName) ? bundled : [...bundled, commName])
       },
     },
   }

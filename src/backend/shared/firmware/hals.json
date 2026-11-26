@@ -129,5 +129,51 @@
         }
       ]
     }
+  },
+  "HIK VC3000": {
+    "compiler": "simulator",
+    "source": "simulator.cpp",
+    "preview": "generic.png",
+    "platform": "win32-x64",
+    "specs": {
+      "OS": "Windows x64",
+      "Digital Inputs": "8 DI (Serial) + 8 GPI (WinIO)",
+      "Digital Outputs": "16 DO (Serial) + 8 GPO (WinIO)",
+      "Light Controller": "4 Channels (0-100%)"
+    },
+    "default_din": "%IX0.0,%IX0.1,%IX0.2,%IX0.3,%IX0.4,%IX0.5,%IX0.6,%IX0.7,%IX1.0,%IX1.1,%IX1.2,%IX1.3,%IX1.4,%IX1.5,%IX1.6,%IX1.7",
+    "default_dout": "%QX0.0,%QX0.1,%QX0.2,%QX0.3,%QX0.4,%QX0.5,%QX0.6,%QX0.7,%QX1.0,%QX1.1,%QX1.2,%QX1.3,%QX1.4,%QX1.5,%QX1.6,%QX1.7,%QX2.0,%QX2.1,%QX2.2,%QX2.3,%QX2.4,%QX2.5,%QX2.6,%QX2.7",
+    "default_aout": "%QW10,%QW11,%QW12,%QW13",
+    "cxx_flags": [
+      "-std=gnu++17"
+    ],
+    "capabilities": {
+      "pinMapping": false,
+      "vppIo": false,
+      "modbusTcpRemote": true,
+      "ethercat": false,
+      "modbusTcpServer": true,
+      "opcuaServer": false,
+      "s7Server": false,
+      "debuggerTransports": [
+        "modbus-serial"
+      ],
+      "pythonFunctionBlocks": true,
+      "arduinoApiCompletions": true,
+      "hasRuntimeStats": false,
+      "isInProcessSimulator": true,
+      "hmiDataWidgets": false,
+      "directUsbUpload": false
+    },
+    "debug": {
+      "channels": [
+        {
+          "label": "Simulator",
+          "channel": "simulator",
+          "enabledWhen": true,
+          "params": {}
+        }
+      ]
+    }
   }
 }

@@ -51,6 +51,16 @@ import {
   restoreCommit,
   switchBranch,
 } from '@root/backend/editor/edge-version-control'
+import { tcpManager } from '@root/backend/editor/tcp'
+import { vc3000Service } from '@root/backend/editor/vc3000'
+import type {
+  Vc3000ActionResult,
+  Vc3000ConnectConfig,
+  Vc3000DetectedPort,
+  Vc3000LightChannelConfig,
+  Vc3000Polarity,
+  Vc3000Status,
+} from '@root/middleware/shared/ports/vc3000-types'
 import { EsiProjectFiles } from '@root/backend/editor/ethercat'
 import { readFolderBytes, readFolderText } from '@root/backend/editor/hmi/hmi-preview-files'
 import { createDesktopCatalogTransport } from '@root/backend/editor/library-manager/desktop-catalog-transport'
@@ -1106,6 +1116,23 @@ class MainProcessBridge implements MainIpcModule {
     this.registerHandle('simulator:stop', this.handleSimulatorStop)
     this.registerHandle('simulator:prepare-python', this.handleSimulatorPreparePython)
     this.registerHandle('simulator:is-running', this.handleSimulatorIsRunning)
+
+    this.registerHandle('vc3000:get-status', () => Promise.resolve(vc3000Service.getStatus()))
+    this.registerHandle('vc3000:scan-ports', (_event: IpcMainInvokeEvent, candidatePorts: string[]) =>
+      Promise.resolve(vc3000Service.scanPorts(candidatePorts)),
+    )
+    this.registerHandle('vc3000:connect', (_event: IpcMainInvokeEvent, config: Vc3000ConnectConfig) =>
+      Promise.resolve(vc3000Service.connect(config)),
+    )
+    this.registerHandle('vc3000:disconnect', () => Promise.resolve(vc3000Service.disconnect()))
+    this.registerHandle(
+      'vc3000:set-polarity',
+      (_event: IpcMainInvokeEvent, payload: { target: 'DI' | 'DO'; polarity: Vc3000Polarity }) =>
+        Promise.resolve(vc3000Service.setPolarity(payload.target, payload.polarity)),
+    )
+    this.registerHandle('vc3000:set-light', (_event: IpcMainInvokeEvent, config: Vc3000LightChannelConfig) =>
+      Promise.resolve(vc3000Service.setLightChannel(config)),
+    )
 
     this.registerHandle('file:watch-start', this.handleFileWatchStart)
     this.registerHandle('file:watch-stop', this.handleFileWatchStop)
@@ -3306,6 +3333,8 @@ class MainProcessBridge implements MainIpcModule {
   stopSimulator(): void {
     this.closeSimulatorSession()
     this.simulator.stop()
+    vc3000Service.disconnect()
+    tcpManager.stopAll()
   }
 
   /** Close the session if it is the simulator's. No-op for any other target. */
