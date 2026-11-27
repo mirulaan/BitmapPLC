@@ -29,6 +29,12 @@ type Vc3000Bridge = {
     polarity: Vc3000Polarity,
   ) => Promise<{ ok: boolean; data?: Vc3000Status; error?: string }>
   vc3000SetLight?: (config: Vc3000LightChannelConfig) => Promise<{ ok: boolean; data?: Vc3000Status; error?: string }>
+  vc3000SetOutput?: (
+    target: 'DO' | 'GPO',
+    channel: number,
+    active: boolean,
+  ) => Promise<{ ok: boolean; data?: Vc3000Status; error?: string }>
+  vc3000ClearOutputs?: () => Promise<{ ok: boolean; data?: Vc3000Status; error?: string }>
 }
 
 function getBridge(): Vc3000Bridge | undefined {
@@ -71,7 +77,27 @@ export function Vc3000ConfigPanel({ availablePorts }: { availablePorts: string[]
       if (res.ok && res.data) {
         setDetectedPorts(res.data)
         if (res.data.length > 0) {
-          setComPort((prev) => (res.data?.some((d) => d.comPort === prev) ? prev : res.data![0].comPort))
+          const targetPort = res.data.some((d) => d.comPort === comPort) ? comPort : res.data[0].comPort
+          setComPort(targetPort)
+          if (!status?.connected && bridge.vc3000Connect) {
+            setBusy(true)
+            try {
+              const connRes = await bridge.vc3000Connect({
+                comPort: targetPort,
+                enableGpio,
+                diPolarity,
+                doPolarity,
+                pollIntervalMs,
+                lightChannels,
+              })
+              if (!connRes.ok) {
+                setError(connRes.error ?? 'Auto-connect failed')
+              }
+              if (connRes.data) setStatus(connRes.data)
+            } finally {
+              setBusy(false)
+            }
+          }
         } else {
           setComPort('')
         }
@@ -81,7 +107,7 @@ export function Vc3000ConfigPanel({ availablePorts }: { availablePorts: string[]
     } finally {
       setScanning(false)
     }
-  }, [availablePorts])
+  }, [availablePorts, comPort, diPolarity, doPolarity, enableGpio, lightChannels, pollIntervalMs, status?.connected])
 
   useEffect(() => {
     let cancelled = false
@@ -92,6 +118,13 @@ export function Vc3000ConfigPanel({ availablePorts }: { availablePorts: string[]
           const st = await bridge.vc3000GetStatus()
           if (cancelled) return
           setStatus(st)
+          setDiPolarity(st.diPolarity)
+          setDoPolarity(st.doPolarity)
+          setPollIntervalMs(st.pollIntervalMs)
+          setEnableGpio(st.gpioConnected)
+          if (st.lightChannels && st.lightChannels.length === 4) {
+            setLightChannels(st.lightChannels.map((c) => ({ ...c })))
+          }
           if (st.lastError) setError(st.lastError)
           if (st.serialConnected && st.comPort) {
             setDetectedPorts([{ comPort: st.comPort, firmwareVersion: st.firmwareVersion ?? 'Connected' }])
@@ -158,6 +191,31 @@ export function Vc3000ConfigPanel({ availablePorts }: { availablePorts: string[]
       if (!res.ok) setError(res.error ?? 'Failed to update light channel')
       if (res.data) setStatus(res.data)
     }
+  }
+
+  useEffect(() => {
+    if (!status?.connected) return
+    const intervalMs = Math.max(100, pollIntervalMs)
+    const timer = setInterval(() => {
+      void refreshStatus()
+    }, intervalMs)
+    return () => clearInterval(timer)
+  }, [pollIntervalMs, refreshStatus, status?.connected])
+
+  const handleToggleOutput = async (target: 'DO' | 'GPO', channel: number, next: boolean) => {
+    const bridge = getBridge()
+    if (!bridge?.vc3000SetOutput) return
+    const res = await bridge.vc3000SetOutput(target, channel, next)
+    if (!res.ok) setError(res.error ?? `Failed to update ${target}${channel}`)
+    if (res.data) setStatus(res.data)
+  }
+
+  const handleClearOutputs = async () => {
+    const bridge = getBridge()
+    if (!bridge?.vc3000ClearOutputs) return
+    const res = await bridge.vc3000ClearOutputs()
+    if (!res.ok) setError(res.error ?? 'Failed to clear outputs')
+    if (res.data) setStatus(res.data)
   }
 
   return (
@@ -346,6 +404,136 @@ export function Vc3000ConfigPanel({ availablePorts }: { availablePorts: string[]
             </div>
           ))}
         </div>
+      </div>
+
+      <div className='flex flex-col gap-3 rounded-md border border-neutral-200 p-3 dark:border-neutral-850'>
+        <div className='flex items-center justify-between'>
+          <div className='flex flex-col'>
+            <Label className='text-xs font-semibold text-neutral-950 dark:text-white'>I/O Simulation & Monitor</Label>
+            <span className='text-[11px] text-neutral-600 dark:text-neutral-400'>
+              Input Polarity: {diPolarity} | Output Polarity: {doPolarity}
+            </span>
+          </div>
+          <button
+            type='button'
+            disabled={!status?.connected || busy}
+            onClick={() => void handleClearOutputs()}
+            className='h-7 rounded-md border border-neutral-300 px-2.5 text-[11px] font-medium text-neutral-850 hover:bg-neutral-100 disabled:opacity-50 dark:border-neutral-850 dark:text-neutral-200 dark:hover:bg-neutral-900'
+          >
+            All Outputs OFF
+          </button>
+        </div>
+
+        <div className='flex flex-col gap-1.5'>
+          <span className='text-[11px] font-medium text-neutral-700 dark:text-neutral-300'>
+            Digital Inputs (DI1–DI8 / %IX0.0–%IX0.7)
+          </span>
+          <div className='grid grid-cols-4 gap-2 sm:grid-cols-8'>
+            {(status?.snapshot.di ?? Array<boolean>(8).fill(false)).map((active, i) => (
+              <div
+                key={`di-${i + 1}`}
+                className={`flex items-center justify-center gap-1.5 rounded-md border px-2 py-1.5 text-[11px] font-medium ${
+                  active
+                    ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                    : 'border-neutral-200 bg-neutral-50 text-neutral-600 dark:border-neutral-850 dark:bg-neutral-950 dark:text-neutral-400'
+                }`}
+              >
+                <span
+                  className={`h-2 w-2 rounded-full ${
+                    active ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.8)]' : 'bg-neutral-400 dark:bg-neutral-700'
+                  }`}
+                />
+                DI{i + 1}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className='flex flex-col gap-1.5'>
+          <span className='text-[11px] font-medium text-neutral-700 dark:text-neutral-300'>
+            Digital Outputs (DO1–DO16 / %QX0.0–%QX1.7) — click to toggle
+          </span>
+          <div className='grid grid-cols-4 gap-2 sm:grid-cols-8'>
+            {(status?.snapshot.doState ?? Array<boolean>(16).fill(false)).map((active, i) => (
+              <button
+                key={`do-${i + 1}`}
+                type='button'
+                disabled={!status?.serialConnected}
+                onClick={() => void handleToggleOutput('DO', i + 1, !active)}
+                className={`flex items-center justify-center gap-1.5 rounded-md border px-2 py-1.5 text-[11px] font-medium transition-colors disabled:opacity-50 ${
+                  active
+                    ? 'border-amber-500/60 bg-amber-500/15 text-amber-700 dark:text-amber-300'
+                    : 'border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-100 dark:border-neutral-850 dark:bg-neutral-950 dark:text-neutral-300 dark:hover:bg-neutral-900'
+                }`}
+              >
+                <span
+                  className={`h-2 w-2 rounded-full ${
+                    active ? 'bg-amber-500 shadow-[0_0_6px_rgba(245,158,11,0.8)]' : 'bg-neutral-400 dark:bg-neutral-700'
+                  }`}
+                />
+                DO{i + 1}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {status?.gpioConnected && (
+          <>
+            <div className='flex flex-col gap-1.5'>
+              <span className='text-[11px] font-medium text-neutral-700 dark:text-neutral-300'>
+                Mainboard Inputs (GPI1–GPI8 / %IX1.0–%IX1.7)
+              </span>
+              <div className='grid grid-cols-4 gap-2 sm:grid-cols-8'>
+                {status.snapshot.gpi.map((active, i) => (
+                  <div
+                    key={`gpi-${i + 1}`}
+                    className={`flex items-center justify-center gap-1.5 rounded-md border px-2 py-1.5 text-[11px] font-medium ${
+                      active
+                        ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                        : 'border-neutral-200 bg-neutral-50 text-neutral-600 dark:border-neutral-850 dark:bg-neutral-950 dark:text-neutral-400'
+                    }`}
+                  >
+                    <span
+                      className={`h-2 w-2 rounded-full ${
+                        active
+                          ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.8)]'
+                          : 'bg-neutral-400 dark:bg-neutral-700'
+                      }`}
+                    />
+                    GPI{i + 1}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className='flex flex-col gap-1.5'>
+              <span className='text-[11px] font-medium text-neutral-700 dark:text-neutral-300'>
+                Mainboard Outputs (GPO1–GPO8 / %QX2.0–%QX2.7) — click to toggle
+              </span>
+              <div className='grid grid-cols-4 gap-2 sm:grid-cols-8'>
+                {status.snapshot.gpo.map((active, i) => (
+                  <button
+                    key={`gpo-${i + 1}`}
+                    type='button'
+                    onClick={() => void handleToggleOutput('GPO', i + 1, !active)}
+                    className={`flex items-center justify-center gap-1.5 rounded-md border px-2 py-1.5 text-[11px] font-medium transition-colors ${
+                      active
+                        ? 'border-amber-500/60 bg-amber-500/15 text-amber-700 dark:text-amber-300'
+                        : 'border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-100 dark:border-neutral-850 dark:bg-neutral-950 dark:text-neutral-300 dark:hover:bg-neutral-900'
+                    }`}
+                  >
+                    <span
+                      className={`h-2 w-2 rounded-full ${
+                        active ? 'bg-amber-500 shadow-[0_0_6px_rgba(245,158,11,0.8)]' : 'bg-neutral-400 dark:bg-neutral-700'
+                      }`}
+                    />
+                    GPO{i + 1}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       <div className='rounded-md border border-neutral-200 p-3 text-xs text-neutral-700 dark:border-neutral-850 dark:text-neutral-300'>

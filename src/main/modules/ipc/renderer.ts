@@ -75,6 +75,7 @@ import type {
   Vc3000ActionResult,
   Vc3000ConnectConfig,
   Vc3000DetectedPort,
+  Vc3000IoIndexMap,
   Vc3000LightChannelConfig,
   Vc3000Polarity,
   Vc3000Status,
@@ -950,5 +951,10 @@ const rendererProcessBridge = {
     ipcRenderer.invoke('vc3000:set-polarity', { target, polarity }),
   vc3000SetLight: (config: Vc3000LightChannelConfig): Promise<Vc3000ActionResult<Vc3000Status>> =>
     ipcRenderer.invoke('vc3000:set-light', config),
+  vc3000SetOutput: (target: 'DO' | 'GPO', channel: number, active: boolean): Promise<Vc3000ActionResult<Vc3000Status>> =>
+    ipcRenderer.invoke('vc3000:set-output', { target, channel, active }),
+  vc3000ClearOutputs: (): Promise<Vc3000ActionResult<Vc3000Status>> => ipcRenderer.invoke('vc3000:clear-outputs'),
+  vc3000SetIoMap: (ioMap: Vc3000IoIndexMap | null): Promise<void> =>
+    ipcRenderer.invoke('vc3000:set-io-map', ioMap),
 }
 export default rendererProcessBridge

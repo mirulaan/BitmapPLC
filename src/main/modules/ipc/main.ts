@@ -57,6 +57,7 @@ import type {
   Vc3000ActionResult,
   Vc3000ConnectConfig,
   Vc3000DetectedPort,
+  Vc3000IoIndexMap,
   Vc3000LightChannelConfig,
   Vc3000Polarity,
   Vc3000Status,
@@ -1133,6 +1134,16 @@ class MainProcessBridge implements MainIpcModule {
     this.registerHandle('vc3000:set-light', (_event: IpcMainInvokeEvent, config: Vc3000LightChannelConfig) =>
       Promise.resolve(vc3000Service.setLightChannel(config)),
     )
+    this.registerHandle(
+      'vc3000:set-output',
+      (_event: IpcMainInvokeEvent, payload: { target: 'DO' | 'GPO'; channel: number; active: boolean }) =>
+        Promise.resolve(vc3000Service.setOutputChannel(payload.target, payload.channel, payload.active)),
+    )
+    this.registerHandle('vc3000:clear-outputs', () => Promise.resolve(vc3000Service.clearAllOutputs()))
+    this.registerHandle('vc3000:set-io-map', (_event: IpcMainInvokeEvent, ioMap: Vc3000IoIndexMap | null) => {
+      this.setVc3000IoMap(ioMap)
+      return Promise.resolve()
+    })
 
     this.registerHandle('file:watch-start', this.handleFileWatchStart)
     this.registerHandle('file:watch-stop', this.handleFileWatchStop)
@@ -3331,10 +3342,143 @@ class MainProcessBridge implements MainIpcModule {
 
   /** Stops the session first, then the emulator. Every stop path routes through here. */
   stopSimulator(): void {
+    this.stopVc3000SimulatorSync()
     this.closeSimulatorSession()
     this.simulator.stop()
-    vc3000Service.disconnect()
+    vc3000Service.clearAllOutputs()
     tcpManager.stopAll()
+  }
+
+  private vc3000IoMap: Vc3000IoIndexMap | null = null
+  private vc3000SyncTimer: ReturnType<typeof setInterval> | null = null
+  private vc3000SyncBusy = false
+  private vc3000LastPushedDi: Array<boolean | null> = Array<boolean | null>(8).fill(null)
+  private vc3000LastPushedGpi: Array<boolean | null> = Array<boolean | null>(8).fill(null)
+
+  private setVc3000IoMap(ioMap: Vc3000IoIndexMap | null): void {
+    this.vc3000IoMap = ioMap
+    this.vc3000LastPushedDi.fill(null)
+    this.vc3000LastPushedGpi.fill(null)
+    if (ioMap && this.debuggerConnectionType === 'simulator') {
+      this.startVc3000SimulatorSync()
+    } else {
+      this.stopVc3000SimulatorSync()
+    }
+  }
+
+  private startVc3000SimulatorSync(): void {
+    this.stopVc3000SimulatorSync()
+    const intervalMs = Math.max(20, vc3000Service.getStatus().pollIntervalMs)
+    this.vc3000SyncTimer = setInterval(() => {
+      void this.tickVc3000SimulatorSync()
+    }, intervalMs)
+  }
+
+  private stopVc3000SimulatorSync(): void {
+    if (this.vc3000SyncTimer) {
+      clearInterval(this.vc3000SyncTimer)
+      this.vc3000SyncTimer = null
+    }
+    this.vc3000SyncBusy = false
+  }
+
+  private async tickVc3000SimulatorSync(): Promise<void> {
+    if (this.vc3000SyncBusy || this.debuggerConnectionType !== 'simulator' || !this.vc3000IoMap) return
+    const status = vc3000Service.getStatus()
+    if (!status.connected) return
+
+    this.vc3000SyncBusy = true
+    try {
+      const map = this.vc3000IoMap
+      const outIndexes: number[] = []
+      const outKinds: Array<{ group: 'do' | 'gpo' | 'light'; slot: number }> = []
+
+      map.doState.forEach((idx, slot) => {
+        if (idx !== null) {
+          outIndexes.push(idx)
+          outKinds.push({ group: 'do', slot })
+        }
+      })
+      map.gpo.forEach((idx, slot) => {
+        if (idx !== null) {
+          outIndexes.push(idx)
+          outKinds.push({ group: 'gpo', slot })
+        }
+      })
+      map.light.forEach((idx, slot) => {
+        if (idx !== null) {
+          outIndexes.push(idx)
+          outKinds.push({ group: 'light', slot })
+        }
+      })
+
+      const nextDo = [...status.snapshot.doState]
+      const nextGpo = [...status.snapshot.gpo]
+      const nextLight: [number, number, number, number] = [...status.snapshot.lightBrightness]
+
+      if (outIndexes.length > 0) {
+        const readRes = await this.withDebugChannel(
+          'vc3000 sync read',
+          (client) => client.getVariablesList(outIndexes),
+          () => null,
+        )
+        if (readRes?.success && readRes.data) {
+          const buf = readRes.data
+          let offset = 0
+          for (let i = 0; i < outKinds.length; i++) {
+            const kind = outKinds[i]
+            if (kind.group === 'light') {
+              if (offset + 2 > buf.length) break
+              const val = buf[offset] | (buf[offset + 1] << 8)
+              nextLight[kind.slot] = Math.max(0, Math.min(100, val))
+              offset += 2
+            } else {
+              if (offset + 1 > buf.length) break
+              const active = buf[offset] !== 0
+              if (kind.group === 'do') nextDo[kind.slot] = active
+              else nextGpo[kind.slot] = active
+              offset += 1
+            }
+          }
+        }
+      }
+
+      const snap = vc3000Service.syncScanCycle({
+        doState: nextDo,
+        gpo: nextGpo,
+        lightBrightness: nextLight,
+      })
+
+      for (let i = 0; i < map.di.length; i++) {
+        const idx = map.di[i]
+        if (idx === null) continue
+        const val = Boolean(snap.di[i])
+        if (val !== this.vc3000LastPushedDi[i]) {
+          const res = await this.withDebugChannel(
+            'vc3000 sync di',
+            (client) => client.setVariable(idx, true, new Uint8Array([val ? 1 : 0])),
+            () => null,
+          )
+          if (res?.success) this.vc3000LastPushedDi[i] = val
+        }
+      }
+
+      for (let i = 0; i < map.gpi.length; i++) {
+        const idx = map.gpi[i]
+        if (idx === null) continue
+        const val = Boolean(snap.gpi[i])
+        if (val !== this.vc3000LastPushedGpi[i]) {
+          const res = await this.withDebugChannel(
+            'vc3000 sync gpi',
+            (client) => client.setVariable(idx, true, new Uint8Array([val ? 1 : 0])),
+            () => null,
+          )
+          if (res?.success) this.vc3000LastPushedGpi[i] = val
+        }
+      }
+    } finally {
+      this.vc3000SyncBusy = false
+    }
   }
 
   /** Close the session if it is the simulator's. No-op for any other target. */

@@ -23,6 +23,7 @@ import {
   MV_IO_LIGHTSTATE_OFF,
   MV_IO_LIGHTSTATE_ON,
   MV_IO_LIGHTSTATE_TRIGGER,
+  MV_IO_PATTERN_PWM,
   MV_IO_PATTERN_SINGLE,
   MV_OK,
   type Vc3000NativeApi,
@@ -308,6 +309,50 @@ export class Vc3000Service {
     return { ok: true, data: this.getStatus() }
   }
 
+  setOutputChannel(target: 'DO' | 'GPO', channel: number, active: boolean): Vc3000ActionResult<Vc3000Status> {
+    if (target === 'DO') {
+      if (channel < 1 || channel > DO_COUNT) {
+        return { ok: false, error: `Invalid DO channel ${channel}` }
+      }
+      if (!this.serialConnected || this.serialHandle === null) {
+        return { ok: false, error: 'Serial IO board is not connected' }
+      }
+      this.snapshot.doState[channel - 1] = active
+      const err = this.writeSerialDo(channel, active)
+      if (err) {
+        this.lastError = err
+        return { ok: false, error: err, data: this.getStatus() }
+      }
+      return { ok: true, data: this.getStatus() }
+    }
+
+    if (channel < 1 || channel > GPO_COUNT) {
+      return { ok: false, error: `Invalid GPO channel ${channel}` }
+    }
+    if (!this.gpioConnected) {
+      return { ok: false, error: 'Mainboard GPIO is not connected' }
+    }
+    this.snapshot.gpo[channel - 1] = active
+    this.writeGpo(channel, active)
+    return { ok: true, data: this.getStatus() }
+  }
+
+  clearAllOutputs(): Vc3000ActionResult<Vc3000Status> {
+    if (this.serialConnected && this.serialHandle !== null) {
+      for (let i = 0; i < DO_COUNT; i++) {
+        this.snapshot.doState[i] = false
+        this.writeSerialDo(i + 1, false)
+      }
+    }
+    if (this.gpioConnected) {
+      for (let i = 0; i < GPO_COUNT; i++) {
+        this.snapshot.gpo[i] = false
+        this.writeGpo(i + 1, false)
+      }
+    }
+    return { ok: true, data: this.getStatus() }
+  }
+
   /**
    * Synchronous scan-cycle I/O exchange:
    * 1. Writes DO1-DO16 (%QX0.0-%QX1.7), GPO1-GPO8 (%QX2.0-%QX2.7), and Light1-4 (%QW10-%QW13)
@@ -399,31 +444,88 @@ export class Vc3000Service {
     }
   }
 
-  private writeSerialDo(channel: number, active: boolean): void {
-    if (!this.api || !this.serialConnected || this.serialHandle === null) return
+  private writeSerialDo(channel: number, active: boolean): string | null {
+    if (!this.api || !this.serialConnected || this.serialHandle === null) return null
     const portMask = 1 << (channel - 1)
     if (active) {
-      this.api.MV_IO_SetOutput(this.serialHandle, {
-        nPort: portMask,
-        nType: MV_IO_PATTERN_SINGLE,
-        nPulseWidth: 0,
-        nPulsePeriod: 0,
-        nDurationTime: 0xffffffff,
-        nValidLevel: 1,
-        nReserved: Array<number>(8).fill(0),
-      })
-      this.api.MV_IO_SetOutputEnable(this.serialHandle, {
+      // In NPN mode, active state is logic 0 (sinking to GND); in PNP mode, active state is logic 1 (+24V).
+      const validLevel = this.doPolarity === 'NPN' ? 0 : 1
+      // Try continuous-style PWM (nPulseWidth < nPulsePeriod, non-zero nDurationTime divisible by nPulsePeriod),
+      // then fall back to SINGLE with large valid durations (avoiding 0 which means 0 pulses / 0ms).
+      const candidates = [
+        {
+          nPort: portMask,
+          nType: MV_IO_PATTERN_PWM,
+          nPulseWidth: 999,
+          nPulsePeriod: 1000,
+          nDurationTime: 10000000,
+          nValidLevel: validLevel,
+          nReserved: Array<number>(8).fill(0),
+        },
+        {
+          nPort: portMask,
+          nType: MV_IO_PATTERN_PWM,
+          nPulseWidth: 999,
+          nPulsePeriod: 1000,
+          nDurationTime: 60000,
+          nValidLevel: validLevel,
+          nReserved: Array<number>(8).fill(0),
+        },
+        {
+          nPort: portMask,
+          nType: MV_IO_PATTERN_SINGLE,
+          nPulseWidth: 0,
+          nPulsePeriod: 0,
+          nDurationTime: 10000000,
+          nValidLevel: validLevel,
+          nReserved: Array<number>(8).fill(0),
+        },
+        {
+          nPort: portMask,
+          nType: MV_IO_PATTERN_SINGLE,
+          nPulseWidth: 0,
+          nPulsePeriod: 0,
+          nDurationTime: 60000,
+          nValidLevel: validLevel,
+          nReserved: Array<number>(8).fill(0),
+        },
+        {
+          nPort: portMask,
+          nType: MV_IO_PATTERN_SINGLE,
+          nPulseWidth: 0,
+          nPulsePeriod: 0,
+          nDurationTime: 0xffffffff,
+          nValidLevel: validLevel,
+          nReserved: Array<number>(8).fill(0),
+        },
+      ]
+      let setRet = MV_OK
+      for (const cfg of candidates) {
+        setRet = this.api.MV_IO_SetOutput(this.serialHandle, cfg)
+        if (setRet === MV_OK) break
+      }
+      if (setRet !== MV_OK) {
+        return `MV_IO_SetOutput(DO${channel}) failed: ${formatMvError(setRet)}`
+      }
+      const enRet = this.api.MV_IO_SetOutputEnable(this.serialHandle, {
         nPortNumber: portMask,
         nType: MV_IO_ENABLE_START,
         nReserved: Array<number>(4).fill(0),
       })
+      if (enRet !== MV_OK) {
+        return `MV_IO_SetOutputEnable(DO${channel}, START) failed: ${formatMvError(enRet)}`
+      }
     } else {
-      this.api.MV_IO_SetOutputEnable(this.serialHandle, {
+      const enRet = this.api.MV_IO_SetOutputEnable(this.serialHandle, {
         nPortNumber: portMask,
         nType: MV_IO_ENABLE_END,
         nReserved: Array<number>(4).fill(0),
       })
+      if (enRet !== MV_OK) {
+        return `MV_IO_SetOutputEnable(DO${channel}, END) failed: ${formatMvError(enRet)}`
+      }
     }
+    return null
   }
 
   private writeGpo(channel: number, active: boolean): void {

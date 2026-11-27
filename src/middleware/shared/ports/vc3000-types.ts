@@ -67,6 +67,14 @@ export interface Vc3000DetectedPort {
   firmwareVersion: string
 }
 
+export interface Vc3000IoIndexMap {
+  di: Array<number | null>
+  gpi: Array<number | null>
+  doState: Array<number | null>
+  gpo: Array<number | null>
+  light: Array<number | null>
+}
+
 export const DEFAULT_VC3000_LIGHT_CHANNELS: Vc3000LightChannelConfig[] = [
   { channel: 1, brightness: 0, state: 'OFF', edge: 'RISING', durationMs: 1000 },
   { channel: 2, brightness: 0, state: 'OFF', edge: 'RISING', durationMs: 1000 },

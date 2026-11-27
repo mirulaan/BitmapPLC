@@ -13,6 +13,7 @@
 import { useCallback, useRef } from 'react'
 
 import type { DebugTreeNode, FbInstanceInfo } from '../../middleware/shared/ports/types'
+import type { Vc3000IoIndexMap } from '../../middleware/shared/ports/vc3000-types'
 import { useDebugger } from '../../middleware/shared/providers'
 import { useOpenPLCStore, useOpenPLCStoreApi } from '../store'
 import { parseDebugMap } from '../utils/debug-parser'
@@ -168,6 +169,66 @@ export function useDebugSession(): UseDebugSessionReturn {
       wsActions.setDebugVariableTree(treeMap)
       wsActions.setFbDebugInstances(fbDebugInstancesMap)
 
+      const vcBridge = (window as unknown as { bridge?: { vc3000SetIoMap?: (m: Vc3000IoIndexMap | null) => Promise<void> } }).bridge
+      if (vcBridge?.vc3000SetIoMap) {
+        const ioMap: Vc3000IoIndexMap = {
+          di: Array<number | null>(8).fill(null),
+          gpi: Array<number | null>(8).fill(null),
+          doState: Array<number | null>(16).fill(null),
+          gpo: Array<number | null>(8).fill(null),
+          light: Array<number | null>(4).fill(null),
+        }
+        const globals = store.getState().project.data.configurations.resource.globalVariables ?? []
+        let hasAny = false
+        for (const v of globals) {
+          const loc = (v.location ?? '').trim().toUpperCase()
+          if (!loc) continue
+          const dbgIdx =
+            indexMap.get(`Config0:${v.name}`) ??
+            indexMap.get(`CONFIG0__${v.name.toUpperCase()}`) ??
+            indexMap.get(`Config0.${v.name}`)
+          if (dbgIdx === undefined) continue
+          const ixMatch = /^%IX(\d+)\.(\d+)$/.exec(loc)
+          if (ixMatch) {
+            const byte = Number(ixMatch[1])
+            const bit = Number(ixMatch[2])
+            if (byte === 0 && bit >= 0 && bit < 8) {
+              ioMap.di[bit] = dbgIdx
+              hasAny = true
+            } else if (byte === 1 && bit >= 0 && bit < 8) {
+              ioMap.gpi[bit] = dbgIdx
+              hasAny = true
+            }
+            continue
+          }
+          const qxMatch = /^%QX(\d+)\.(\d+)$/.exec(loc)
+          if (qxMatch) {
+            const byte = Number(qxMatch[1])
+            const bit = Number(qxMatch[2])
+            if (byte === 0 && bit >= 0 && bit < 8) {
+              ioMap.doState[bit] = dbgIdx
+              hasAny = true
+            } else if (byte === 1 && bit >= 0 && bit < 8) {
+              ioMap.doState[8 + bit] = dbgIdx
+              hasAny = true
+            } else if (byte === 2 && bit >= 0 && bit < 8) {
+              ioMap.gpo[bit] = dbgIdx
+              hasAny = true
+            }
+            continue
+          }
+          const qwMatch = /^%QW(\d+)$/.exec(loc)
+          if (qwMatch) {
+            const word = Number(qwMatch[1])
+            if (word >= 10 && word <= 13) {
+              ioMap.light[word - 10] = dbgIdx
+              hasAny = true
+            }
+          }
+        }
+        void vcBridge.vc3000SetIoMap(hasAny ? ioMap : null)
+      }
+
       // Set default selected instance for each FB type
       fbDebugInstancesMap.forEach((instanceList: FbInstanceInfo[], fbTypeName: string) => {
         if (instanceList.length > 0) {
@@ -209,6 +270,8 @@ export function useDebugSession(): UseDebugSessionReturn {
    * and closing that session is the connection manager's.
    */
   const stopSession = useCallback(async () => {
+    const vcBridge = (window as unknown as { bridge?: { vc3000SetIoMap?: (m: Vc3000IoIndexMap | null) => Promise<void> } }).bridge
+    void vcBridge?.vc3000SetIoMap?.(null)
     await debuggerPort.disconnect()
 
     workspaceActions.clearDebugState()
